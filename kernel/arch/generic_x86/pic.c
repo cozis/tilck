@@ -92,6 +92,9 @@ void init_pic_8259(u8 offset1, u8 offset2)
    outb(PIC2_IMR, ICW4_8086);
    pic_io_wait();
 
+   outb(PIC1_IMR, 0xff);
+   outb(PIC2_IMR, 0xff);
+
    /* wait a lot for the PIC to initialize */
    if (!in_hypervisor()) {
       for (int i = 0; i < 50; i++)
@@ -201,6 +204,13 @@ void irq_clear_mask(int irq)
       irq_mask = inb(port);
       irq_mask &= ~(1 << irq);
       outb(port, irq_mask);
+
+      if (port == PIC2_IMR) {
+         /* Ensure cascade (IRQ 2) is unmasked on master PIC */
+         irq_mask = inb(PIC1_IMR);
+         irq_mask &= ~(1 << PIC_CASCADE);
+         outb(PIC1_IMR, irq_mask);
+      }
    }
    enable_interrupts(&var);
 }
