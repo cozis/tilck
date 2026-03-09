@@ -141,7 +141,8 @@ bool arp_process_packet(void *src, size_t len)
 
             // Generate the ARP REPLY
 
-            struct arp_message *response = eth_send_begin(sizeof(struct arp_message));
+            size_t dummy;
+            struct arp_message *response = eth_send_begin(sizeof(struct arp_message), &dummy, true);
             if (response == NULL) {
                 ASSERT(0); // TODO
             }
