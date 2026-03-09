@@ -17,6 +17,7 @@
 #include <tilck/kernel/modules.h>
 #include <tilck/kernel/hal.h>
 #include <tilck/kernel/irq.h>
+#include <tilck/kernel/net.h>
 #include <tilck/kernel/kmalloc.h>
 #include <tilck/kernel/debug_utils.h>
 #include <tilck/kernel/sched.h>
@@ -387,6 +388,9 @@ kmain(u32 multiboot_magic, u32 mbi_addr)
    init_timer();
    init_system_time();
    init_kernelfs();
+
+   char ip[] = "10.0.0.1";
+   init_net(ip, sizeof(ip)-1);
 
    async_init();
    do_schedule();

@@ -6,6 +6,7 @@
 
 #include <tilck/common/printk.h>
 #include <tilck/kernel/hal.h>
+#include <tilck/kernel/net.h>
 #include <tilck/kernel/errno.h>
 #include <tilck/kernel/sched.h>
 #include <tilck/kernel/paging.h>
@@ -14,7 +15,6 @@
 #include <tilck/kernel/worker_thread.h>
 #include <tilck/kernel/irq.h>
 #include <tilck/mods/pci.h>
-#include <tilck/mods/e1000.h>
 
 #define CEIL(X, Y) (((X) + (Y) - 1) / (Y))
 
@@ -191,6 +191,8 @@ static struct worker_thread *wth;
 
 static int device_version;
 
+static struct mac_addr mac;
+
 static struct tx_desc *tx_ring;
 static struct rx_desc *rx_ring;
 
@@ -267,7 +269,7 @@ static void write_reg(u32 off, u32 val)
 /*
  * Send packet
  */
-int e1000_send(char *src, int len)
+static int e1000_send(char *src, int len)
 {
     /* Number of descriptors that would be required to send this message. */
     u32 num_desc = CEIL((u32) len, TX_BUF_SIZE);
@@ -297,15 +299,6 @@ int e1000_send(char *src, int len)
     return 0;
 }
 
-/*
- * Process an actual packet.
- */
-static void process_packet(void *packet, u32 packet_len)
-{
-    printk("e1000: INFO: Processing packet\n");
-    // TODO
-}
-
 static void process_incoming_desc(void *ctx)
 {
     /*
@@ -322,10 +315,10 @@ static void process_incoming_desc(void *ctx)
             * Packet received in a single entry
             */
 
-            void *src = PA_TO_KERNEL_VA(rx_ring[rx_tail].addr);
-            int   len = rx_ring[rx_tail].length;
+            void  *src = PA_TO_KERNEL_VA(rx_ring[rx_tail].addr);
+            size_t len = rx_ring[rx_tail].length;
 
-            process_packet(src, len);
+            net_process_packet(src, len);
 
         } else {
             /*
@@ -570,16 +563,13 @@ static int load_mac_addr(void)
     rc = eeprom_read(2, &b2);
     if (rc) return rc;
 
-#if 0
-    u8 mac_addr[6];
-    mac_addr[0] = b0 & 0xFF;
-    mac_addr[1] = b0 >> 8;
-    mac_addr[2] = b1 & 0xFF;
-    mac_addr[3] = b1 >> 8;
-    mac_addr[4] = b2 & 0xFF;
-    mac_addr[5] = b2 >> 8;
+    mac.data[0] = b0 & 0xFF;
+    mac.data[1] = b0 >> 8;
+    mac.data[2] = b1 & 0xFF;
+    mac.data[3] = b1 >> 8;
+    mac.data[4] = b2 & 0xFF;
+    mac.data[5] = b2 >> 8;
     // TODO: Maybe print the current MAC address
-#endif
 
     u32 lo = ((u32) b1 << 16) | b0;
     u32 hi = b2;
@@ -720,6 +710,11 @@ configure_pci_command_reg(struct pci_device_loc loc)
     return 0;
 }
 
+static struct mac_addr e1000_get_mac_addr(void)
+{
+    return mac;
+}
+
 static void init_e1000(void)
 {
     struct pci_device *dev = NULL;
@@ -803,6 +798,10 @@ static void init_e1000(void)
         printk("e1000: Unable to create a worker thread for IRQs");
         return;
     }
+
+    /* Plug the driver into the network stack */
+    net_driver_funcs.get_mac_addr = e1000_get_mac_addr;
+    net_driver_funcs.send_frame = e1000_send;
 
     irq_install_handler(interrupt_line, &irq_handler_node);
 
