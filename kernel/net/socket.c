@@ -1,0 +1,311 @@
+#include <tilck_gen_headers/config_userlim.h>
+#include <tilck/common/basic_defs.h>
+#include <tilck/common/string_util.h>
+#include <tilck/kernel/user.h>
+#include <tilck/kernel/fs/vfs.h>
+#include <tilck/kernel/kmalloc.h>
+#include <tilck/kernel/process.h>
+#include <tilck/kernel/syscalls.h>
+
+#include "udp.h"
+
+enum sock_type {
+    SOCK_LISTENER,
+    SOCK_CONNECTION,
+};
+
+struct message {
+    struct list_node node;
+    ip_addr sender_addr;
+    u16     sender_port;
+    size_t  size;
+    char    data[];
+};
+
+struct socket {
+
+    /* struct fs_handle base */
+    FS_HANDLE_BASE_FIELDS
+
+    enum sock_type type;
+    struct list_node node;
+    struct list messages;
+
+    bool is_bound;
+    u16  port;
+};
+STATIC_ASSERT(sizeof(struct socket) <= MAX_FS_HANDLE_SIZE);
+
+static struct list all_socks;
+static struct mnt_fs *sockfs;
+
+static void sock_on_close(fs_handle handle)
+{
+    struct socket *s = handle;
+
+    // TODO
+
+    list_remove(&s->node);
+    kfree(s);
+}
+
+static void sock_close_last_handle(fs_handle handle)
+{
+    destory_fs_obj(sockfs);
+    sockfs = NULL;
+}
+
+static int sock_on_dup_cb(fs_handle handle)
+{
+    panic("TODO"); // TODO
+}
+
+static ssize_t sock_read(fs_handle, char *, size_t, offt *)
+{
+    panic("TODO"); // TODO
+}
+
+static ssize_t sock_write(fs_handle, char *, size_t, offt *)
+{
+    panic("TODO"); // TODO
+}
+
+static int sock_ioctl(fs_handle, ulong, void *)
+{
+    panic("TODO"); // TODO
+}
+
+static int sock_read_ready(fs_handle h)
+{
+    struct socket *s = h;
+    return !list_is_empty(&s->messages);
+}
+
+static int sock_write_ready(fs_handle h)
+{
+    return 1;
+}
+
+static int sock_except_ready(fs_handle)
+{
+    return 0;
+}
+
+static struct kcond *sock_get_rready_cond(fs_handle)
+{
+    panic("TODO"); // TODO
+}
+
+static struct kcond *sock_get_wready_cond(fs_handle)
+{
+    panic("TODO"); // TODO
+}
+
+static struct kcond *sock_get_except_cond(fs_handle)
+{
+    panic("TODO"); // TODO
+}
+
+static struct fs_ops static_fsops_sockfs = {
+    .on_close = sock_on_close,
+    .on_close_last_handle = sock_close_last_handle,
+    .on_dup_cb = sock_on_dup_cb,
+};
+
+static struct file_ops static_ops_sockfs = {
+    .read = sock_read,
+    .write = sock_write,
+    .ioctl = sock_ioctl,
+    .read_ready = sock_read_ready,
+    .write_ready = sock_write_ready,
+    .except_ready = sock_except_ready,
+    .get_rready_cond = sock_get_rready_cond,
+    .get_wready_cond = sock_get_wready_cond,
+    .get_except_cond = sock_get_except_cond,
+};
+
+// TODO: This was copied from fs_syscalls.c
+static int get_free_handle_num_ge(struct process *pi, int ge)
+{
+   for (int free_fd = ge; free_fd < MAX_HANDLES; free_fd++)
+      if (!pi->handles[free_fd])
+         return free_fd;
+
+   return -1;
+}
+
+// TODO: This was copied from fs_syscalls.c
+static int get_free_handle_num(struct process *pi)
+{
+   return get_free_handle_num_ge(pi, 0);
+}
+
+int sys_socket(int domain, int type, int proto)
+{
+    int free_fd;
+    fs_handle h;
+    struct socket *s;
+    struct task *curr = get_curr_task();
+
+    if (domain != AF_INET)
+        return -EPROTONOSUPPORT; /* TODO: Proper error code? */
+
+    if (type != SOCK_DGRAM)
+        return -EPROTONOSUPPORT; /* TODO: Proper error code? */
+
+    /* TODO: Check proto argument */
+
+    if (!sockfs) {
+        sockfs = create_fs_obj("sockfs", &static_fsops_sockfs, NULL, 0);
+        if (!sockfs)
+            return -ENOMEM;
+    }
+
+    if ((free_fd = get_free_handle_num(curr->pi)) < 0)
+        return -EMFILE;
+
+    h = vfs_create_new_handle(sockfs, &static_ops_sockfs);
+    if (!h)
+        return -ENFILE;
+
+    s = h;
+    s->type = SOCK_DGRAM;
+    list_node_init(&s->node);
+    list_init(&s->messages);
+    s->is_bound = false;
+    s->port = 0;
+
+    list_add_head(&all_socks, &s->node);
+    curr->pi->handles[free_fd] = (fs_handle) s;
+    return free_fd;
+}
+
+static bool is_socket(fs_handle h)
+{
+    struct fs_handle_base *hb = h;
+    return hb->fops == &static_ops_sockfs;
+}
+
+int sys_recvfrom(int fd, void *buf, size_t len,
+    int flags, struct sockaddr *src_addr,
+    socklen_t *addrlen)
+{
+    fs_handle h;
+    struct socket *s;
+    struct message *m;
+
+    if (!(h = get_fs_handle(fd)))
+        return -EBADF;
+
+    if (!is_socket(h))
+        return -ENOTSOCK; /* TODO: Check this is the correct errno */
+    s = h;
+
+    if (!s->is_bound) {
+        // TODO
+    }
+
+    m = list_first_obj(&s->messages, struct message, node);
+    if (!m)
+        return -EAGAIN;
+    list_remove(&m->node);
+
+    size_t num = len;
+    num = MIN(num, m->size);
+    num = MIN(num, (size_t) INT_MAX);
+    if (copy_to_user(buf, m->data, num) < 0) {
+        kfree(m);
+        return -EFAULT;
+    }
+
+    if (*addrlen != sizeof(struct sockaddr_in)) {
+        kfree(m);
+        return -EINVAL;
+    }
+
+    struct sockaddr_in addr_buf;
+    addr_buf.sin_family      = AF_INET;
+    addr_buf.sin_port        = m->sender_port;
+    addr_buf.sin_addr.s_addr = m->sender_addr;
+    if (copy_to_user(src_addr, &addr_buf, sizeof(addr_buf)) < 0) {
+        kfree(m);
+        return -EFAULT;
+    }
+
+    socklen_t addr_len = sizeof(addr_buf);
+    if (copy_to_user(addrlen, &addr_len, sizeof(addr_len)) < 0) {
+        kfree(m);
+        return -EFAULT;
+    }
+
+    kfree(m);
+    return (int) num;
+}
+
+int sys_sendto(int fd, const void *buf, size_t len,
+    int flags, const struct sockaddr *dest_addr,
+    socklen_t dest_len)
+{
+    fs_handle h;
+    struct socket *s;
+
+    h = get_fs_handle(fd);
+    if (!h)
+        return -EBADF;
+
+    if (!is_socket(h))
+        return -ENOTSOCK; /* TODO: Check this is the correct errno */
+    s = h;
+
+    if (!s->is_bound) {
+        // TODO
+    }
+
+    ip_addr dst_ip;
+    u16     dst_port;
+    {
+        if (dest_len != sizeof(struct sockaddr_in))
+            return -EINVAL; // TODO: Proper error code?
+
+        struct sockaddr_in tmp;
+        if (copy_from_user(&tmp, dest_addr, dest_len) < 0)
+            return -EFAULT;
+
+        if (tmp.sin_family != AF_INET)
+            return -EINVAL;
+
+        dst_ip   = tmp.sin_addr.s_addr;
+        dst_port = tmp.sin_port; // TODO: Endianess?
+    }
+
+    void *dst = udp_send_begin(len);
+    if (dst == NULL) {
+        // TODO
+    }
+
+    if (copy_from_user(dst, buf, len) < 0)
+        return -EFAULT;
+
+    udp_send_complete(dst_ip, s->port, dst_port);
+    return len; /* TODO: What if len>INT_MAX ? */
+}
+
+void dispatch_datagram(ip_addr sender_addr, struct udp_datagram *datagram)
+{
+    struct socket *s;
+    list_for_each_ro(s, &all_socks, node) {
+        if (s->port == datagram->dst_port) {
+
+            struct message *m = kmalloc(sizeof(struct message) + datagram->length - sizeof(datagram));
+            if (!m) return;
+
+            m->sender_addr = sender_addr;
+            m->sender_port = datagram->src_port;
+            m->size = datagram->length;
+            memcpy(m->data, datagram+1, datagram->length);
+
+            list_add_tail(&s->messages, &m->node);
+            break;
+        }
+    }
+}

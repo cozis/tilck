@@ -537,7 +537,6 @@ CREATE_STUB_SYSCALL_IMPL(sys_getrandom)
 CREATE_STUB_SYSCALL_IMPL(sys_memfd_create)
 CREATE_STUB_SYSCALL_IMPL(sys_bpf)
 CREATE_STUB_SYSCALL_IMPL(sys_execveat)
-CREATE_STUB_SYSCALL_IMPL(sys_socket)
 CREATE_STUB_SYSCALL_IMPL(sys_socketpair)
 CREATE_STUB_SYSCALL_IMPL(sys_bind)
 CREATE_STUB_SYSCALL_IMPL(sys_connect)
@@ -548,9 +547,7 @@ CREATE_STUB_SYSCALL_IMPL(sys_getsockopt)
 CREATE_STUB_SYSCALL_IMPL(sys_setsockopt)
 CREATE_STUB_SYSCALL_IMPL(sys_getsockname)
 CREATE_STUB_SYSCALL_IMPL(sys_getpeername)
-CREATE_STUB_SYSCALL_IMPL(sys_sendto)
 CREATE_STUB_SYSCALL_IMPL(sys_sendmsg)
-CREATE_STUB_SYSCALL_IMPL(sys_recvfrom)
 CREATE_STUB_SYSCALL_IMPL(sys_recvmsg)
 CREATE_STUB_SYSCALL_IMPL(sys_shutdown)
 CREATE_STUB_SYSCALL_IMPL(sys_userfaultfd)
@@ -634,3 +631,12 @@ CREATE_STUB_SYSCALL_IMPL(sys_fchmodat2)
 
 int sys_tilck_cmd(int cmd_n, ulong a1, ulong a2, ulong a3, ulong a4);
 
+int sys_socket(int domain, int type, int proto);
+
+int sys_recvfrom(int fd, void *buf, size_t len,
+    int flags, struct sockaddr *src_addr,
+    socklen_t *addrlen);
+
+int sys_sendto(int fd, const void *buf, size_t len,
+    int flags, const struct sockaddr *dest_addr,
+    socklen_t dest_len);

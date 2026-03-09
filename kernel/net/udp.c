@@ -1,13 +1,7 @@
 #include "ip.h"
 #include "udp.h"
 #include "endian.h"
-
-struct udp_datagram {
-    u16 src_port;
-    u16 dst_port;
-    u16 length;
-    u16 checksum;
-};
+#include "socket.h"
 
 static void*  send_ptr; /* TODO: Race condition probably */
 static size_t send_len;
@@ -30,7 +24,17 @@ static u16 calculate_checksum_udp(void *src, size_t len)
 
 void udp_process_datagram(void *src, size_t len, ip_addr sender_addr)
 {
-    // TODO
+    if (len < sizeof(struct udp_datagram))
+        return;
+    struct udp_datagram *datagram = src;
+
+    if (len < datagram->length)
+        return;
+
+    if (calculate_checksum_udp(datagram, datagram->length))
+        return;
+
+    dispatch_datagram(sender_addr, datagram);
 }
 
 void *udp_send_begin(size_t len)
