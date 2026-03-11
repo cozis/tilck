@@ -99,8 +99,10 @@ bool arp_process_packet(void *src, size_t len)
 {
     printk("ARP: Processing packet\n");
 
-    if (len != sizeof(struct arp_message))
+    if (len < sizeof(struct arp_message)) {
+        printk("ARP: Dropping message due to invalid size (expected %d, got %d)\n", sizeof(struct arp_message), len);
         return false; // Ignore
+    }
 
     struct arp_message *msg = src;
 
@@ -131,6 +133,8 @@ bool arp_process_packet(void *src, size_t len)
     bool added = false;
     if (msg->target_proto_addr == self_ip) {
 
+        printk("ARP: We are the target\n");
+
         if (!merge) {
             added = create_or_update_entry(msg->sender_hware_addr,
                                            msg->sender_proto_addr,
@@ -140,6 +144,7 @@ bool arp_process_packet(void *src, size_t len)
         if (msg->oper_type == cpu_to_net_u16(ARP_OPER_REQUEST)) {
 
             // Generate the ARP REPLY
+            printk("ARP: Sending reply\n");
 
             size_t dummy;
             struct arp_message *response = eth_send_begin(sizeof(struct arp_message), &dummy, true);
@@ -161,6 +166,7 @@ bool arp_process_packet(void *src, size_t len)
         }
     } else {
         // Request not for us
+        printk("ARP: Request not meant for us\n");
     }
 
     return added;

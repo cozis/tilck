@@ -4,12 +4,13 @@
 
 // server program for udp connection
 #include <stdio.h>
+#include <errno.h>
 #include <string.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#define PORT 5000
+#define PORT 22
 #define MAXLINE 1000
 
 // Driver code
@@ -30,6 +31,7 @@ int main()
 
     // bind server address to socket descriptor
     bind(listenfd, (struct sockaddr*)&servaddr, sizeof(servaddr));
+    printf("error: %s\n", strerror(errno));
 
     //receive the datagram
     len = sizeof(cliaddr);

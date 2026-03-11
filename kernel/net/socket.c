@@ -6,14 +6,10 @@
 #include <tilck/kernel/kmalloc.h>
 #include <tilck/kernel/process.h>
 #include <tilck/kernel/syscalls.h>
+#include <tilck/kernel/sync.h>
 
 #include "udp.h"
 #include "endian.h"
-
-enum sock_type {
-    SOCK_LISTENER,
-    SOCK_CONNECTION,
-};
 
 struct message {
     struct list_node node;
@@ -28,12 +24,17 @@ struct socket {
     /* struct fs_handle base */
     FS_HANDLE_BASE_FIELDS
 
-    enum sock_type type;
     struct list_node node;
     struct list messages;
+    int num_messages;
+
+    bool block;
 
     bool is_bound;
     u16  port; /* Host byte order */
+
+    struct kmutex lock;
+    struct kcond  message_available;
 };
 STATIC_ASSERT(sizeof(struct socket) <= MAX_FS_HANDLE_SIZE);
 
@@ -50,7 +51,8 @@ static void sock_on_close(fs_handle handle)
 {
     struct socket *s = handle;
 
-    // TODO
+    kmutex_destroy(&s->lock);
+    kcond_destroy(&s->message_available);
 
     list_remove(&s->node);
     kfree(s); // TODO: Should vfs_free_handle be called here?
@@ -221,11 +223,14 @@ int sys_socket(int domain, int type, int proto)
     retain_obj(get_fs(h));
 
     s = h;
-    s->type = SOCK_DGRAM;
     list_node_init(&s->node);
     list_init(&s->messages);
+    s->num_messages = 0;
+    s->block = true;
     s->is_bound = false;
     s->port = 0;
+    kmutex_init(&s->lock, 0);
+    kcond_init(&s->message_available);
 
     list_add_head(&all_socks, &s->node);
     curr->pi->handles[free_fd] = (fs_handle) s;
@@ -252,7 +257,7 @@ int sys_bind(int fd, const struct sockaddr *addr,
         return -ENOTSOCK; /* TODO: Check this is the correct errno */
     s = h;
 
-    if (!s->is_bound)
+    if (s->is_bound)
         return -EINVAL; /* Already bound */
 
     if (addrlen != sizeof(struct sockaddr_in))
@@ -261,6 +266,9 @@ int sys_bind(int fd, const struct sockaddr *addr,
     struct sockaddr_in buf;
     if (copy_from_user(&buf, addr, sizeof(buf)) < 0)
         return -EFAULT;
+
+    if (buf.sin_family != AF_INET)
+        return -EINVAL;
 
     if (net_to_cpu_u32(buf.sin_addr.s_addr) == INADDR_ANY) {
         /* Do nothing */
@@ -298,21 +306,34 @@ int sys_recvfrom(int fd, void *buf, size_t len,
         ASSERT(0); // TODO: Block forever
     }
 
-    m = list_first_obj(&s->messages, struct message, node);
-    if (!m)
-        return -EAGAIN;
-    list_remove(&m->node);
+    printk("SOCKET: Retrieving datagram from socket\n");
+    kmutex_lock(&s->lock);
+    while (list_is_empty(&s->messages) && s->block) {
+        printk("SOCKET: Waiting\n");
+        kcond_wait(&s->message_available, &s->lock, KCOND_WAIT_FOREVER);
+        printk("SOCKET: Woke up\n");
+    }
+    printk("SOCKET: Retrieved\n");
+    if (list_is_empty(&s->messages)) {
+        m = NULL;
+    } else {
+        m = list_first_obj(&s->messages, struct message, node);
+        list_remove(&m->node);
+        s->num_messages--;
+    }
+    kmutex_unlock(&s->lock);
+    if (!m) return -EAGAIN;
 
     size_t num = len;
     num = MIN(num, m->size);
     num = MIN(num, (size_t) INT_MAX);
     if (copy_to_user(buf, m->data, num) < 0) {
-        kfree(m);
+        //kfree(m); TODO: uncomment
         return -EFAULT;
     }
 
     if (*addrlen != sizeof(struct sockaddr_in)) {
-        kfree(m);
+        //kfree(m); TODO: uncomment
         return -EINVAL;
     }
 
@@ -321,17 +342,17 @@ int sys_recvfrom(int fd, void *buf, size_t len,
     addr_buf.sin_port        = m->sender_port;
     addr_buf.sin_addr.s_addr = m->sender_addr;
     if (copy_to_user(src_addr, &addr_buf, sizeof(addr_buf)) < 0) {
-        kfree(m);
+        //kfree(m); TODO: uncomment
         return -EFAULT;
     }
 
     socklen_t addr_len = sizeof(addr_buf);
     if (copy_to_user(addrlen, &addr_len, sizeof(addr_len)) < 0) {
-        kfree(m);
+        //kfree(m); TODO: uncomment
         return -EFAULT;
     }
 
-    kfree(m);
+    //kfree(m); TODO: uncomment
     return (int) num;
 }
 
@@ -396,7 +417,12 @@ void dispatch_datagram(ip_addr sender_addr, struct udp_datagram *datagram)
             m->size = datagram->length;
             memcpy(m->data, datagram+1, datagram->length);
 
+            printk("SOCKET: Storing datagram into socket\n");
+            kmutex_lock(&s->lock);
             list_add_tail(&s->messages, &m->node);
+            s->num_messages++;
+            kcond_signal_one(&s->message_available);
+            kmutex_unlock(&s->lock);
             break;
         }
     }

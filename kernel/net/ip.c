@@ -110,18 +110,22 @@ void ip_process_packet(void *src, size_t len)
 
 void *ip_send_begin(size_t request_len, size_t *actual_len, bool precise_len)
 {
+    ASSERT(!send_ptr);
+
     request_len += sizeof(struct ip_packet);
 
-    char *ptr = eth_send_begin(request_len, actual_len, precise_len);
-    if (!ptr)
+    send_ptr = eth_send_begin(request_len, actual_len, precise_len);
+    if (!send_ptr)
         return NULL;
 
     *actual_len -= sizeof(struct ip_packet); /* TODO: underflow? */
-    return ptr + sizeof(struct ip_packet);
+    return send_ptr + sizeof(struct ip_packet);
 }
 
 void ip_send_complete(ip_addr dst, int proto)
 {
+    ASSERT(send_ptr);
+
     struct ip_packet *packet = send_ptr;
     int version = 4;
     int header_length = 5;

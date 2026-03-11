@@ -42,8 +42,12 @@ send_out_frames_with_resolved_addrs(void);
 
 void eth_process_frame(void *src, size_t len)
 {
-    if (len < sizeof(struct eth_frame))
+    printk("ETH: Processing frame (len=%d)\n", len);
+
+    if (len < sizeof(struct eth_frame)) {
+        printk("ETH: Frame is too short. Dropping it.\n");
         return; /* Not a valid frame. Drop it. */
+    }
     struct eth_frame *frame = src;
 
     void *packet = frame+1;
@@ -53,19 +57,23 @@ void eth_process_frame(void *src, size_t len)
     switch (net_to_cpu_u16(frame->proto)) {
 
     case ETH_PROTO_ARP:
+        printk("ETH: Forwarding frame to the ARP layer.\n");
         arp_entry_added = arp_process_packet(packet, packet_len);
         break;
 
     case ETH_PROTO_IP:
+        printk("ETH: Forwarding frame to the IP layer.\n");
         ip_process_packet(packet, packet_len);
         break;
 
     default:
+        printk("ETH: Frame has an unsupported ethertype.\n");
         // Unsupported ethertype
         break;
     }
 
     if (arp_entry_added) {
+        printk("ETH: Processing frames with unresolved MAC addresses.\n");
         send_out_frames_with_resolved_addrs();
     }
 }

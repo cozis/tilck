@@ -389,7 +389,7 @@ kmain(u32 multiboot_magic, u32 mbi_addr)
    init_system_time();
    init_kernelfs();
 
-   char ip[] = "10.0.0.1";
+   char ip[] = "10.0.2.15"; /* Set by qemu */
    init_net(ip, sizeof(ip)-1);
 
    async_init();

@@ -50,6 +50,7 @@ void *udp_send_begin(size_t len)
 
 void udp_send_complete(ip_addr ip, u16 src_port, u16 dst_port)
 {
+    ASSERT(send_ptr);
     struct udp_datagram *dgram = send_ptr;
     dgram->src_port = src_port;
     dgram->dst_port = dst_port;

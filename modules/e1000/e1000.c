@@ -171,7 +171,7 @@ struct tx_desc {
     u8  checksum_offset;
     u8  command;
     u8  status;
-    u8  checkum_start;
+    u8  checksum_start;
     u16 special;
 };
 
@@ -231,7 +231,6 @@ struct {
     { VER_82545GM_B,  0x8086, 0x1028 },
     { VER_82544EI_A4, 0x8086, 0x1107 },
     { VER_82544GC_A4, 0x8086, 0x1112 },
-    { VER_82541EI_A0, 0x8086, 0x1013 },
     { VER_82541EI_A0, 0x8086, 0x1013 },
     { VER_82541EI_B0, 0x8086, 0x1013 },
     { VER_82541EI_B0, 0x8086, 0x1018 },
@@ -331,7 +330,7 @@ static void process_incoming_desc(void *ctx)
         rx_tail = (rx_tail + 1) % RX_RING_CAP;
     } while (rx_ring[rx_tail].status & BIT_RX_STATUS_DD);
 
-    write_reg(REG_RDT, rx_tail);
+    write_reg(REG_RDT, (rx_tail + RX_RING_CAP - 1) % RX_RING_CAP);
 }
 
 static void process_link_status_change(void *ctx)
@@ -514,7 +513,6 @@ eeprom_read_nolock(u8 off, u16 *dst)
     u32 eerd;
     if (device_version == VER_82547EI_A0 ||
         device_version == VER_82547EI_A1 ||
-        device_version == VER_82547EI_B0 ||
         device_version == VER_82547EI_B0 ||
         device_version == VER_82547GI_B0 ||
         device_version == VER_82541EI_A0 ||
