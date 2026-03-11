@@ -8,6 +8,7 @@
 #include <tilck/kernel/syscalls.h>
 
 #include "udp.h"
+#include "endian.h"
 
 enum sock_type {
     SOCK_LISTENER,
@@ -32,7 +33,7 @@ struct socket {
     struct list messages;
 
     bool is_bound;
-    u16  port;
+    u16  port; /* Host byte order */
 };
 STATIC_ASSERT(sizeof(struct socket) <= MAX_FS_HANDLE_SIZE);
 
@@ -52,7 +53,7 @@ static void sock_on_close(fs_handle handle)
     // TODO
 
     list_remove(&s->node);
-    kfree(s);
+    kfree(s); // TODO: Should vfs_free_handle be called here?
 }
 
 static void sock_close_last_handle(fs_handle handle)
@@ -161,6 +162,28 @@ static int get_free_handle_num(struct process *pi)
    return get_free_handle_num_ge(pi, 0);
 }
 
+#define EPHIMERAL_PORT_MIN 10000
+#define EPHIMERAL_PORT_MAX 60000
+
+static u16 next_ephimeral_port = EPHIMERAL_PORT_MIN;
+static u16 get_ephimeral_port(void)
+{
+    u16 port = next_ephimeral_port; /* TODO: Should ensure no conflicts can happen */
+    if (next_ephimeral_port == EPHIMERAL_PORT_MAX) {
+        next_ephimeral_port = EPHIMERAL_PORT_MIN;
+    } else {
+        next_ephimeral_port++;
+    }
+    return port;
+}
+
+static void bind_to_ephimeral_port(struct socket *s)
+{
+    ASSERT(!s->is_bound);
+    s->port = get_ephimeral_port();
+    s->is_bound = true;
+}
+
 int sys_socket(int domain, int type, int proto)
 {
     int free_fd;
@@ -216,6 +239,46 @@ static bool is_socket(fs_handle h)
     return hb->fops == &static_ops_sockfs;
 }
 
+int sys_bind(int fd, const struct sockaddr *addr,
+    socklen_t addrlen)
+{
+    fs_handle h;
+    struct socket *s;
+
+    if (!(h = get_fs_handle(fd)))
+        return -EBADF;
+
+    if (!is_socket(h))
+        return -ENOTSOCK; /* TODO: Check this is the correct errno */
+    s = h;
+
+    if (!s->is_bound)
+        return -EINVAL; /* Already bound */
+
+    if (addrlen != sizeof(struct sockaddr_in))
+        return -EINVAL;
+
+    struct sockaddr_in buf;
+    if (copy_from_user(&buf, addr, sizeof(buf)) < 0)
+        return -EFAULT;
+
+    if (net_to_cpu_u32(buf.sin_addr.s_addr) == INADDR_ANY) {
+        /* Do nothing */
+    } else {
+        if (buf.sin_addr.s_addr != self_ip)
+            return -EADDRNOTAVAIL;
+    }
+
+    if (buf.sin_port == 0) {
+        s->port = get_ephimeral_port();
+    } else {
+        s->port = net_to_cpu_u16(buf.sin_port);
+    }
+
+    s->is_bound = true;
+    return 0;
+}
+
 int sys_recvfrom(int fd, void *buf, size_t len,
     int flags, struct sockaddr *src_addr,
     socklen_t *addrlen)
@@ -232,7 +295,7 @@ int sys_recvfrom(int fd, void *buf, size_t len,
     s = h;
 
     if (!s->is_bound) {
-        // TODO
+        ASSERT(0); // TODO: Block forever
     }
 
     m = list_first_obj(&s->messages, struct message, node);
@@ -288,7 +351,7 @@ int sys_sendto(int fd, const void *buf, size_t len,
     s = h;
 
     if (!s->is_bound) {
-        // TODO
+        bind_to_ephimeral_port(s);
     }
 
     ip_addr dst_ip;
@@ -305,7 +368,7 @@ int sys_sendto(int fd, const void *buf, size_t len,
             return -EINVAL;
 
         dst_ip   = tmp.sin_addr.s_addr;
-        dst_port = tmp.sin_port; // TODO: Endianess?
+        dst_port = net_to_cpu_u16(tmp.sin_port);
     }
 
     void *dst = udp_send_begin(len);

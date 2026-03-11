@@ -538,7 +538,6 @@ CREATE_STUB_SYSCALL_IMPL(sys_memfd_create)
 CREATE_STUB_SYSCALL_IMPL(sys_bpf)
 CREATE_STUB_SYSCALL_IMPL(sys_execveat)
 CREATE_STUB_SYSCALL_IMPL(sys_socketpair)
-CREATE_STUB_SYSCALL_IMPL(sys_bind)
 CREATE_STUB_SYSCALL_IMPL(sys_connect)
 CREATE_STUB_SYSCALL_IMPL(sys_listen)
 CREATE_STUB_SYSCALL_IMPL(sys_accept)
@@ -632,6 +631,9 @@ CREATE_STUB_SYSCALL_IMPL(sys_fchmodat2)
 int sys_tilck_cmd(int cmd_n, ulong a1, ulong a2, ulong a3, ulong a4);
 
 int sys_socket(int domain, int type, int proto);
+
+int sys_bind(int fd, const struct sockaddr *addr,
+    socklen_t addrlen);
 
 int sys_recvfrom(int fd, void *buf, size_t len,
     int flags, struct sockaddr *src_addr,
