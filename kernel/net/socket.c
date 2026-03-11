@@ -39,6 +39,12 @@ STATIC_ASSERT(sizeof(struct socket) <= MAX_FS_HANDLE_SIZE);
 static struct list all_socks;
 static struct mnt_fs *sockfs;
 
+void init_socket(void)
+{
+    list_init(&all_socks);
+    sockfs = NULL;
+}
+
 static void sock_on_close(fs_handle handle)
 {
     struct socket *s = handle;
@@ -51,6 +57,7 @@ static void sock_on_close(fs_handle handle)
 
 static void sock_close_last_handle(fs_handle handle)
 {
+    // TODO: check sockfs refcount here
     destory_fs_obj(sockfs);
     sockfs = NULL;
 }
@@ -58,6 +65,18 @@ static void sock_close_last_handle(fs_handle handle)
 static int sock_on_dup_cb(fs_handle handle)
 {
     panic("TODO"); // TODO
+}
+
+static vfs_inode_ptr_t sock_get_inode(fs_handle h)
+{
+    /* TODO: can this return NULL? */
+   return NULL;
+}
+
+static int sock_release_inode(struct mnt_fs *fs, vfs_inode_ptr_t ptr)
+{
+    /* TODO: Can this be empty? */
+    return 1;
 }
 
 static ssize_t sock_read(fs_handle, char *, size_t, offt *)
@@ -110,6 +129,8 @@ static struct fs_ops static_fsops_sockfs = {
     .on_close = sock_on_close,
     .on_close_last_handle = sock_close_last_handle,
     .on_dup_cb = sock_on_dup_cb,
+    .get_inode = sock_get_inode,
+    .release_inode = sock_release_inode,
 };
 
 static struct file_ops static_ops_sockfs = {
@@ -159,14 +180,22 @@ int sys_socket(int domain, int type, int proto)
         sockfs = create_fs_obj("sockfs", &static_fsops_sockfs, NULL, 0);
         if (!sockfs)
             return -ENOMEM;
+        retain_obj(sockfs);
     }
 
-    if ((free_fd = get_free_handle_num(curr->pi)) < 0)
+    kmutex_lock(&curr->pi->fslock);
+
+    if ((free_fd = get_free_handle_num(curr->pi)) < 0) {
+        kmutex_unlock(&curr->pi->fslock);
         return -EMFILE;
+    }
 
     h = vfs_create_new_handle(sockfs, &static_ops_sockfs);
-    if (!h)
+    if (!h) {
+        kmutex_unlock(&curr->pi->fslock);
         return -ENFILE;
+    }
+    retain_obj(get_fs(h));
 
     s = h;
     s->type = SOCK_DGRAM;
@@ -177,6 +206,7 @@ int sys_socket(int domain, int type, int proto)
 
     list_add_head(&all_socks, &s->node);
     curr->pi->handles[free_fd] = (fs_handle) s;
+    kmutex_unlock(&curr->pi->fslock);
     return free_fd;
 }
 
@@ -279,9 +309,8 @@ int sys_sendto(int fd, const void *buf, size_t len,
     }
 
     void *dst = udp_send_begin(len);
-    if (dst == NULL) {
-        // TODO
-    }
+    if (!dst)
+        return -EMSGSIZE;
 
     if (copy_from_user(dst, buf, len) < 0)
         return -EFAULT;
