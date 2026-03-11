@@ -67,6 +67,7 @@ include_directories(${ZLIB_DIR}/install/include)
    add_usermode_app(termtest)
    add_usermode_app(fbtest)
    add_usermode_app(play)
+   add_usermode_app(testsocket)
 
    if (MOD_debugpanel)
       add_usermode_app(dp)
