@@ -108,7 +108,7 @@
 #define BIT_IMS_TXD_LOW  (1 << 15)
 #define BIT_IMS_SRPD     (1 << 16)
 
-#define BIT_TCTL_EN      (1 << 0)
+#define BIT_TCTL_EN      (1 << 1)
 #define BIT_TCTL_PSP     (1 << 3)
 
 #define BIT_RCTL_EN      (1 << 1)
@@ -270,6 +270,8 @@ static void write_reg(u32 off, u32 val)
  */
 static int e1000_send(char *src, int len)
 {
+    printk("e1000: Sending frame len=%d\n", len);
+
     /* Number of descriptors that would be required to send this message. */
     u32 num_desc = CEIL((u32) len, TX_BUF_SIZE);
 
@@ -286,7 +288,6 @@ static int e1000_send(char *src, int len)
 
         __builtin_memcpy(PA_TO_KERNEL_VA(tx_ring[tx_tail].addr), src + off, num);
         tx_ring[tx_tail].length = num;
-        tx_ring[tx_tail].command = 0;
         if (i == num_desc-1)
             tx_ring[tx_tail].command |= TX_DESC_CMD_IFCS | TX_DESC_CMD_EOP;
 
@@ -350,6 +351,8 @@ static enum irq_action irq_handler_func(void *ctx)
      */
     u32 icr = read_reg(REG_ICR);
 
+    printk("e1000: Interrupt!\n");
+
     if (icr & BIT_IMS_RXT0) {
         // Packets received
         if (!wth_enqueue_on(wth, process_incoming_desc, NULL))
@@ -361,6 +364,11 @@ static enum irq_action irq_handler_func(void *ctx)
         // Link status change
         if (!wth_enqueue_on(wth, process_link_status_change, NULL))
             printk("e1000: WARNING: hit job queue limit\n");
+        ret = IRQ_HANDLED;
+    }
+
+    if (icr & BIT_IMS_TXDW) {
+        printk("e1000: TX writeback interrupt\n");
         ret = IRQ_HANDLED;
     }
 
@@ -418,7 +426,8 @@ static int setup_tx_ring(void)
     write_reg(REG_TDLEN, TX_DESC_SIZE * TX_RING_CAP);    /* queue size in bytes */
     write_reg(REG_TDH, 0);                               /* head */
     write_reg(REG_TDT, 0);                               /* tail */
-    write_reg(REG_TCTL, BIT_TCTL_EN | BIT_TCTL_PSP);             /* transmit mode */
+
+    write_reg(REG_TCTL, BIT_TCTL_EN | BIT_TCTL_PSP);     /* transmit mode */
     return 0;
 }
 
@@ -480,7 +489,8 @@ static int setup_rx_ring(void)
 static void enable_nic_interrupts(void)
 {
     read_reg(REG_ICR);
-    write_reg(REG_IMS, BIT_IMS_RXT0 | BIT_IMS_RXO | BIT_IMS_LSC);
+    //write_reg(REG_IMS, BIT_IMS_RXT0 | BIT_IMS_RXO | BIT_IMS_LSC);
+    write_reg(REG_IMS, BIT_IMS_RXT0 | BIT_IMS_RXO | BIT_IMS_LSC | BIT_IMS_TXDW);
 }
 
 static void eeprom_unlock(void)
@@ -567,7 +577,9 @@ static int load_mac_addr(void)
     mac.data[3] = b1 >> 8;
     mac.data[4] = b2 & 0xFF;
     mac.data[5] = b2 >> 8;
-    // TODO: Maybe print the current MAC address
+    printk("e1000: MAC address is %x:%x:%x:%x:%x:%x\n",
+        mac.data[0], mac.data[1], mac.data[2],
+        mac.data[3], mac.data[4], mac.data[5]);
 
     u32 lo = ((u32) b1 << 16) | b0;
     u32 hi = b2;

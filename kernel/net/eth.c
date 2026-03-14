@@ -13,6 +13,8 @@ struct eth_frame {
     u16             proto;
 } __attribute__((packed));
 
+STATIC_ASSERT(sizeof(struct eth_frame) == 14);
+
 struct pending_frame {
     ip_addr dstip;
     int     proto;
@@ -54,7 +56,9 @@ void eth_process_frame(void *src, size_t len)
     int   packet_len = len - sizeof(struct eth_frame);
 
     bool arp_entry_added = false;
-    switch (net_to_cpu_u16(frame->proto)) {
+
+    u16 ethertype = net_to_cpu_u16(frame->proto);
+    switch (ethertype) {
 
     case ETH_PROTO_ARP:
         printk("ETH: Forwarding frame to the ARP layer.\n");
@@ -67,7 +71,7 @@ void eth_process_frame(void *src, size_t len)
         break;
 
     default:
-        printk("ETH: Frame has an unsupported ethertype.\n");
+        printk("ETH: Frame has an unsupported ethertype %x.\n", ethertype);
         // Unsupported ethertype
         break;
     }
@@ -92,6 +96,7 @@ void *eth_send_begin(size_t request_len, size_t *actual_len, bool precise_len)
     send_buf = kmalloc(sizeof(struct eth_frame) + request_len); /* TODO: There is probably a race condition here */
     if (!send_buf)
         return NULL;
+    send_len = sizeof(struct eth_frame) + request_len;
 
     *actual_len = request_len;
     return send_buf + sizeof(struct eth_frame);
@@ -102,7 +107,16 @@ static void send_complete(struct mac_addr dstmac, int proto,
 {
     frame->dst = dstmac;
     frame->src = net_driver_funcs.get_mac_addr();
-    frame->proto = proto;
+    frame->proto = cpu_to_net_u16(proto);
+
+    printk("Outgoing Frame (%d bytes):\n", send_len);
+    printk("  dst %x:%x:%x:%x:%x:%x\n",
+        frame->dst.data[0], frame->dst.data[1], frame->dst.data[2],
+        frame->dst.data[3], frame->dst.data[4], frame->dst.data[5]);
+    printk("  src %x:%x:%x:%x:%x:%x\n",
+        frame->src.data[0], frame->src.data[1], frame->src.data[2],
+        frame->src.data[3], frame->src.data[4], frame->src.data[5]);
+    printk("  proto %x\n", net_to_cpu_u16(frame->proto));
 
     net_driver_funcs.send_frame(send_buf, send_len);
 

@@ -8,11 +8,11 @@
 #define ARP_TABLE_CAP 32
 #define ARP_ENTRY_EXPIRY_TICKS 1000
 
-#define ARP_HARDWARE_ETH 1
+#define ARP_HARDWARE_ETH 0x001
 #define ARP_PROTOCOL_IP  0x800
 
-#define ARP_OPER_REQUEST 1
-#define ARP_OPER_REPLY   2
+#define ARP_OPER_REQUEST 0x1
+#define ARP_OPER_REPLY   0x2
 
 struct arp_message {
     u16             hware_type;
@@ -25,6 +25,8 @@ struct arp_message {
     struct mac_addr target_hware_addr;
     ip_addr         target_proto_addr;
 } __attribute__((__packed__));
+
+STATIC_ASSERT(sizeof(struct arp_message) == 28);
 
 struct arp_entry {
     u64             deadline; /* Absolute deadline in ticks */
@@ -92,6 +94,32 @@ static bool create_or_update_entry(struct mac_addr mac, ip_addr ip, u64 deadline
     return true;
 }
 
+static void dump_arp_message(struct arp_message msg, char *str)
+{
+    printk("%s:\n", str);
+    printk("  hware_type %x\n", net_to_cpu_u16(msg.hware_type));
+    printk("  proto_type %x\n", net_to_cpu_u16(msg.proto_type));
+    printk("  hware_len  %x\n", msg.hware_len);
+    printk("  proto_len  %x\n", msg.proto_len);
+    printk("  oper_type  %x\n", net_to_cpu_u16(msg.oper_type));
+    printk("  sender_hware_addr %x:%x:%x:%x:%x:%x\n",
+            msg.sender_hware_addr.data[0],
+            msg.sender_hware_addr.data[1],
+            msg.sender_hware_addr.data[2],
+            msg.sender_hware_addr.data[3],
+            msg.sender_hware_addr.data[4],
+            msg.sender_hware_addr.data[5]);
+    printk("  sender_proto_addr %x\n", msg.sender_proto_addr);
+    printk("  target_hware_addr %x:%x:%x:%x:%x:%x\n",
+            msg.target_hware_addr.data[0],
+            msg.target_hware_addr.data[1],
+            msg.target_hware_addr.data[2],
+            msg.target_hware_addr.data[3],
+            msg.target_hware_addr.data[4],
+            msg.target_hware_addr.data[5]);
+    printk("  target_proto_addr %x\n", msg.target_proto_addr);
+}
+
 /*
  * Returns true if an ARP entry was added or updated
  */
@@ -105,6 +133,7 @@ bool arp_process_packet(void *src, size_t len)
     }
 
     struct arp_message *msg = src;
+    dump_arp_message(*msg, "ARP REQUEST");
 
     if (msg->hware_type != cpu_to_net_u16(ARP_HARDWARE_ETH)) {
         /* Level 2 protocol not supported */
@@ -162,6 +191,8 @@ bool arp_process_packet(void *src, size_t len)
                 .target_hware_addr = msg->sender_hware_addr,
                 .target_proto_addr = msg->sender_proto_addr,
             };
+
+            dump_arp_message(*response, "ARP REPLY");
             eth_send_complete(msg->sender_hware_addr, ETH_PROTO_ARP);
         }
     } else {
