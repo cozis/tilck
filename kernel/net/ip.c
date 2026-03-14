@@ -126,6 +126,7 @@ void *ip_send_begin(size_t request_len, size_t *actual_len, bool precise_len)
     send_ptr = eth_send_begin(request_len, actual_len, precise_len);
     if (!send_ptr)
         return NULL;
+    send_len = *actual_len;
 
     *actual_len -= sizeof(struct ip_packet); /* TODO: underflow? */
     return send_ptr + sizeof(struct ip_packet);
@@ -154,6 +155,8 @@ void ip_send_complete(ip_addr dst, int proto)
     packet->checksum = 0; /* Temporary value */
     packet->src_ip = self_ip;
     packet->dst_ip = dst;
+
+    packet->checksum = calculate_checksum_ip(packet, sizeof(struct ip_packet));
 
     eth_send_complete_ip(dst, ETH_PROTO_IP);
     send_ptr = NULL;

@@ -288,6 +288,7 @@ static int e1000_send(char *src, int len)
 
         __builtin_memcpy(PA_TO_KERNEL_VA(tx_ring[tx_tail].addr), src + off, num);
         tx_ring[tx_tail].length = num;
+        tx_ring[tx_tail].command = TX_DESC_CMD_RS;
         if (i == num_desc-1)
             tx_ring[tx_tail].command |= TX_DESC_CMD_IFCS | TX_DESC_CMD_EOP;
 
