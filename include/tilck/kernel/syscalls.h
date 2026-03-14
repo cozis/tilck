@@ -538,10 +538,6 @@ CREATE_STUB_SYSCALL_IMPL(sys_memfd_create)
 CREATE_STUB_SYSCALL_IMPL(sys_bpf)
 CREATE_STUB_SYSCALL_IMPL(sys_execveat)
 CREATE_STUB_SYSCALL_IMPL(sys_socketpair)
-CREATE_STUB_SYSCALL_IMPL(sys_connect)
-CREATE_STUB_SYSCALL_IMPL(sys_listen)
-CREATE_STUB_SYSCALL_IMPL(sys_accept)
-CREATE_STUB_SYSCALL_IMPL(sys_accept4)
 CREATE_STUB_SYSCALL_IMPL(sys_getsockopt)
 CREATE_STUB_SYSCALL_IMPL(sys_setsockopt)
 CREATE_STUB_SYSCALL_IMPL(sys_getsockname)
@@ -634,6 +630,16 @@ int sys_socket(int domain, int type, int proto);
 
 int sys_bind(int fd, const struct sockaddr *addr,
     socklen_t addrlen);
+
+int sys_connect(int sockfd, const struct sockaddr *addr,
+    socklen_t addrlen);
+
+int sys_listen(int sockfd, int backlog);
+
+int sys_accept(int sockfd, struct sockaddr *addr,
+    socklen_t *addrlen);
+
+CREATE_STUB_SYSCALL_IMPL(sys_accept4)
 
 int sys_recvfrom(int fd, void *buf, size_t len,
     int flags, struct sockaddr *src_addr,

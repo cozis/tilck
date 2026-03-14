@@ -2,6 +2,7 @@
 
 #include "ip.h"
 #include "udp.h"
+#include "tcp.h"
 #include "eth.h"
 #include "icmp.h"
 #include "endian.h"
@@ -109,7 +110,8 @@ void ip_process_packet(void *src, size_t len)
         udp_process_datagram(payload, payload_len, packet->src_ip);
         break;
     case IP_PROTO_TCP:
-        /* Not implemented */
+        printk("IP: Forwarding packet to TCP\n");
+        tcp_process_segment(payload, payload_len, packet->src_ip);
         break;
     default:
         /* Unsupported protocol */

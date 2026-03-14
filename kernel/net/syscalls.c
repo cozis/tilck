@@ -9,14 +9,12 @@
 #include <tilck/kernel/sync.h>
 
 #include "udp.h"
+#include "tcp.h"
 #include "endian.h"
 
-struct message {
-    struct list_node node;
-    ip_addr sender_addr;
-    u16     sender_port;
-    size_t  size;
-    char    data[];
+enum socktype {
+    SOCK_UDP,
+    SOCK_TCP,
 };
 
 struct socket {
@@ -24,37 +22,31 @@ struct socket {
     /* struct fs_handle base */
     FS_HANDLE_BASE_FIELDS
 
-    struct list_node node;
-    struct list messages;
-    int num_messages;
+    enum socktype type;
 
     bool block;
 
     bool is_bound;
     u16  port; /* Host byte order */
 
-    struct kmutex lock;
-    struct kcond  message_available;
+    union {
+        struct udp_socket udp;
+        struct tcp_socket tcp;
+    };
 };
 STATIC_ASSERT(sizeof(struct socket) <= MAX_FS_HANDLE_SIZE);
 
-static struct list all_socks;
-static struct mnt_fs *sockfs;
-
-void init_socket(void)
-{
-    list_init(&all_socks);
-    sockfs = NULL;
-}
+static struct mnt_fs *sockfs = NULL;
 
 static void sock_on_close(fs_handle handle)
 {
     struct socket *s = handle;
-
-    kmutex_destroy(&s->lock);
-    kcond_destroy(&s->message_available);
-
-    list_remove(&s->node);
+    if (s->type == SOCK_UDP) {
+        udp_socket_free(&s->udp);
+    } else {
+        ASSERT(s->type == SOCK_TCP);
+        tcp_socket_free(&s->tcp);
+    }
 }
 
 static void sock_close_last_handle(fs_handle handle)
@@ -99,30 +91,44 @@ static int sock_ioctl(fs_handle, ulong, void *)
 static int sock_read_ready(fs_handle h)
 {
     struct socket *s = h;
-    return !list_is_empty(&s->messages);
+    if (s->type == SOCK_UDP) {
+        return udp_socket_read_ready(&s->udp);
+    } else {
+        return tcp_socket_read_ready(&s->tcp);
+    }
 }
 
 static int sock_write_ready(fs_handle h)
 {
-    return 1;
+    struct socket *s = h;
+    if (s->type == SOCK_UDP) {
+        return udp_socket_write_ready(&s->udp);
+    } else {
+        return tcp_socket_write_ready(&s->tcp);
+    }
 }
 
-static int sock_except_ready(fs_handle)
+static int sock_except_ready(fs_handle h)
 {
-    return 0;
+    struct socket *s = h;
+    if (s->type == SOCK_UDP) {
+        return udp_socket_except_ready(&s->udp);
+    } else {
+        return tcp_socket_except_ready(&s->tcp);
+    }
 }
 
-static struct kcond *sock_get_rready_cond(fs_handle)
+static struct kcond *sock_get_rready_cond(fs_handle h)
 {
     panic("TODO"); // TODO
 }
 
-static struct kcond *sock_get_wready_cond(fs_handle)
+static struct kcond *sock_get_wready_cond(fs_handle h)
 {
     panic("TODO"); // TODO
 }
 
-static struct kcond *sock_get_except_cond(fs_handle)
+static struct kcond *sock_get_except_cond(fs_handle h)
 {
     panic("TODO"); // TODO
 }
@@ -187,15 +193,12 @@ static void bind_to_ephimeral_port(struct socket *s)
 
 int sys_socket(int domain, int type, int proto)
 {
-    int free_fd;
-    fs_handle h;
-    struct socket *s;
     struct task *curr = get_curr_task();
 
     if (domain != AF_INET)
         return -EPROTONOSUPPORT; /* TODO: Proper error code? */
 
-    if (type != SOCK_DGRAM)
+    if (type != SOCK_DGRAM && type != SOCK_STREAM)
         return -EPROTONOSUPPORT; /* TODO: Proper error code? */
 
     /* TODO: Check proto argument */
@@ -209,29 +212,33 @@ int sys_socket(int domain, int type, int proto)
 
     kmutex_lock(&curr->pi->fslock);
 
+    int free_fd;
     if ((free_fd = get_free_handle_num(curr->pi)) < 0) {
         kmutex_unlock(&curr->pi->fslock);
         return -EMFILE;
     }
 
-    h = vfs_create_new_handle(sockfs, &static_ops_sockfs);
+    fs_handle h = vfs_create_new_handle(sockfs, &static_ops_sockfs);
     if (!h) {
         kmutex_unlock(&curr->pi->fslock);
         return -ENFILE;
     }
     retain_obj(get_fs(h));
+    struct socket *s = h;
 
-    s = h;
-    list_node_init(&s->node);
-    list_init(&s->messages);
-    s->num_messages = 0;
     s->block = true;
     s->is_bound = false;
     s->port = 0;
-    kmutex_init(&s->lock, 0);
-    kcond_init(&s->message_available);
 
-    list_add_head(&all_socks, &s->node);
+    if (type == SOCK_DGRAM) {
+        s->type = SOCK_UDP;
+        udp_socket_init(&s->udp);
+    } else {
+        ASSERT(type == SOCK_STREAM);
+        s->type = SOCK_TCP;
+        tcp_socket_init(&s->tcp);
+    }
+
     curr->pi->handles[free_fd] = (fs_handle) s;
     kmutex_unlock(&curr->pi->fslock);
     return free_fd;
@@ -246,15 +253,12 @@ static bool is_socket(fs_handle h)
 int sys_bind(int fd, const struct sockaddr *addr,
     socklen_t addrlen)
 {
-    fs_handle h;
-    struct socket *s;
-
-    if (!(h = get_fs_handle(fd)))
-        return -EBADF;
+    fs_handle h = get_fs_handle(fd);
+    if (!h) return -EBADF;
 
     if (!is_socket(h))
         return -ENOTSOCK; /* TODO: Check this is the correct errno */
-    s = h;
+    struct socket *s = h;
 
     if (s->is_bound)
         return -EINVAL; /* Already bound */
@@ -286,153 +290,94 @@ int sys_bind(int fd, const struct sockaddr *addr,
     return 0;
 }
 
+int sys_connect(int fd, const struct sockaddr *addr,
+    socklen_t addrlen)
+{
+    fs_handle h = get_fs_handle(fd);
+    if (!h) return -EBADF;
+
+    if (!is_socket(h))
+        return -ENOTSOCK; /* TODO: Check this is the correct errno */
+    struct socket *s = h;
+
+    if (s->type == SOCK_UDP) {
+        return udp_connect(&s->udp, addr, addrlen);
+    } else {
+        return tcp_connect(&s->tcp, addr, addrlen);
+    }
+}
+
+int sys_listen(int fd, int backlog)
+{
+    fs_handle h = get_fs_handle(fd);
+    if (!h) return -EBADF;
+
+    if (!is_socket(h))
+        return -ENOTSOCK; /* TODO: Check this is the correct errno */
+    struct socket *s = h;
+
+    if (s->type == SOCK_UDP) {
+        return udp_listen(&s->udp, backlog);
+    } else {
+        return tcp_listen(&s->tcp, backlog);
+    }
+}
+
+int sys_accept(int fd, struct sockaddr *addr,
+    socklen_t *addrlen)
+{
+    fs_handle h = get_fs_handle(fd);
+    if (!h) return -EBADF;
+
+    if (!is_socket(h))
+        return -ENOTSOCK; /* TODO: Check this is the correct errno */
+    struct socket *s = h;
+
+    if (s->type == SOCK_UDP) {
+        return udp_accept(&s->udp, addr, addrlen);
+    } else {
+        return tcp_accept(&s->tcp, addr, addrlen);
+    }
+}
+
 int sys_recvfrom(int fd, void *buf, size_t len,
     int flags, struct sockaddr *src_addr,
     socklen_t *addrlen)
 {
-    fs_handle h;
-    struct socket *s;
-    struct message *m;
-
-    if (!(h = get_fs_handle(fd)))
-        return -EBADF;
+    fs_handle h = get_fs_handle(fd);
+    if (!h) return -EBADF;
 
     if (!is_socket(h))
         return -ENOTSOCK; /* TODO: Check this is the correct errno */
-    s = h;
+    struct socket *s = h;
 
-    if (!s->is_bound) {
-        ASSERT(0); // TODO: Block forever
-    }
-
-    printk("SOCKET: Retrieving datagram from socket\n");
-    kmutex_lock(&s->lock);
-    while (list_is_empty(&s->messages) && s->block) {
-        printk("SOCKET: Waiting\n");
-        kcond_wait(&s->message_available, &s->lock, KCOND_WAIT_FOREVER);
-        printk("SOCKET: Woke up\n");
-    }
-    printk("SOCKET: Retrieved\n");
-    if (list_is_empty(&s->messages)) {
-        m = NULL;
+    if (s->type == SOCK_UDP) {
+        if (!s->is_bound) {
+            ASSERT(0); // TODO: Block forever
+        }
+        return udp_recvfrom(&s->udp, buf, len, flags, src_addr, addrlen);
     } else {
-        m = list_first_obj(&s->messages, struct message, node);
-        list_remove(&m->node);
-        s->num_messages--;
+        return tcp_recvfrom(&s->tcp, buf, len, flags, src_addr, addrlen);
     }
-    kmutex_unlock(&s->lock);
-    if (!m) return -EAGAIN;
-
-    size_t num = len;
-    num = MIN(num, m->size);
-    num = MIN(num, (size_t) INT_MAX);
-    if (copy_to_user(buf, m->data, num) < 0) {
-        //kfree(m); TODO: uncomment
-        return -EFAULT;
-    }
-
-    if (*addrlen != sizeof(struct sockaddr_in)) {
-        //kfree(m); TODO: uncomment
-        return -EINVAL;
-    }
-
-    struct sockaddr_in addr_buf;
-    addr_buf.sin_family      = AF_INET;
-    addr_buf.sin_port        = cpu_to_net_u16(m->sender_port);
-    addr_buf.sin_addr.s_addr = m->sender_addr;
-    if (copy_to_user(src_addr, &addr_buf, sizeof(addr_buf)) < 0) {
-        //kfree(m); TODO: uncomment
-        return -EFAULT;
-    }
-
-    socklen_t addr_len = sizeof(addr_buf);
-    if (copy_to_user(addrlen, &addr_len, sizeof(addr_len)) < 0) {
-        //kfree(m); TODO: uncomment
-        return -EFAULT;
-    }
-
-    //kfree(m); TODO: uncomment
-    return (int) num;
 }
 
 int sys_sendto(int fd, const void *buf, size_t len,
     int flags, const struct sockaddr *dest_addr,
     socklen_t dest_len)
 {
-    fs_handle h;
-    struct socket *s;
-
-    h = get_fs_handle(fd);
-    if (!h)
-        return -EBADF;
+    fs_handle h = get_fs_handle(fd);
+    if (!h) return -EBADF;
 
     if (!is_socket(h))
         return -ENOTSOCK; /* TODO: Check this is the correct errno */
-    s = h;
+    struct socket *s = h;
 
-    if (!s->is_bound) {
+    if (!s->is_bound)
         bind_to_ephimeral_port(s);
-    }
 
-    ip_addr dst_ip;
-    u16     dst_port;
-    {
-        if (dest_len != sizeof(struct sockaddr_in))
-            return -EINVAL; // TODO: Proper error code?
-
-        struct sockaddr_in tmp;
-        if (copy_from_user(&tmp, dest_addr, dest_len) < 0)
-            return -EFAULT;
-
-        if (tmp.sin_family != AF_INET)
-            return -EINVAL;
-
-        dst_ip   = tmp.sin_addr.s_addr;
-        dst_port = net_to_cpu_u16(tmp.sin_port);
-    }
-
-    void *dst = udp_send_begin(len);
-    if (!dst)
-        return -EMSGSIZE;
-
-    if (copy_from_user(dst, buf, len) < 0)
-        return -EFAULT;
-
-    udp_send_complete(dst_ip, s->port, dst_port);
-    return len; /* TODO: What if len>INT_MAX ? */
-}
-
-void dispatch_datagram(ip_addr sender_addr, struct udp_datagram *datagram)
-{
-    bool found = false;
-    struct socket *s;
-    list_for_each_ro(s, &all_socks, node) {
-        if (s->port == net_to_cpu_u16(datagram->dst_port)) {
-
-            struct message *m = kmalloc(sizeof(struct message) + net_to_cpu_u16(datagram->length) - sizeof(datagram));
-            if (!m) {
-                printk("SOCKET: Couldn't allocate message buffer\n");
-                return;
-            }
-
-            m->sender_addr = sender_addr;
-            m->sender_port = net_to_cpu_u16(datagram->src_port);
-            m->size = net_to_cpu_u16(datagram->length);
-            memcpy(m->data, datagram+1, net_to_cpu_u16(datagram->length));
-
-            printk("SOCKET: Storing datagram into socket\n");
-            kmutex_lock(&s->lock);
-            list_add_tail(&s->messages, &m->node);
-            s->num_messages++;
-            kcond_signal_one(&s->message_available);
-            kmutex_unlock(&s->lock);
-
-            found = true;
-            break;
-        }
-    }
-
-    if (!found) {
-        printk("SOCKET: No socket found for datagram\n");
+    if (s->type == SOCK_UDP) {
+        return udp_sendto(&s->udp, buf, len, flags, dest_addr, dest_len);
+    } else {
+        return tcp_sendto(&s->tcp, buf, len, flags, dest_addr, dest_len);
     }
 }

@@ -2,7 +2,8 @@
 #include <tilck/common/printk.h>
 
 #include "eth.h"
-#include "socket.h"
+#include "udp.h"
+#include "tcp.h"
 #include "endian.h"
 
 struct net_driver_funcs net_driver_funcs;
@@ -59,9 +60,10 @@ static bool parse_ip(char *str, size_t len, ip_addr *dst)
 
 void init_net(char *str, size_t len)
 {
-    init_socket();
     if (!parse_ip(str, len, &self_ip))
         panic("NET: Invalid IP address\n");
+    init_udp();
+    init_tcp();
 }
 
 void net_process_packet(void *src, size_t len)
