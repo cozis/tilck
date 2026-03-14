@@ -1,3 +1,6 @@
+#include <tilck/common/printk.h>
+#include <tilck/kernel/hal.h>
+
 #include "ip.h"
 #include "udp.h"
 #include "endian.h"
@@ -24,16 +27,23 @@ static u16 calculate_checksum_udp(void *src, size_t len)
 
 void udp_process_datagram(void *src, size_t len, ip_addr sender_addr)
 {
-    if (len < sizeof(struct udp_datagram))
+    if (len < sizeof(struct udp_datagram)) {
+        printk("UDP: Datagram length too small (%d). Dropping it.\n", len);
         return;
+    }
     struct udp_datagram *datagram = src;
 
-    if (len < datagram->length)
+    if (len < net_to_cpu_u16(datagram->length)) {
+        printk("UDP: Datagram length field invalid (got %d, expected %d)\n", len, net_to_cpu_u16(datagram->length));
         return;
+    }
 
-    if (calculate_checksum_udp(datagram, datagram->length))
+    if (calculate_checksum_udp(datagram, net_to_cpu_u16(datagram->length)) && !in_hypervisor()) {
+        printk("UDP: Datagram checksum invalid. Dropping it.\n");
         return;
+    }
 
+    printk("UDP: Dispatching datagram to socket\n");
     dispatch_datagram(sender_addr, datagram);
 }
 
@@ -44,7 +54,7 @@ void *udp_send_begin(size_t len)
     if (send_ptr == NULL)
         return NULL;
 
-    send_len = len;
+    send_len = sizeof(struct udp_datagram) + len;
     return (char*) send_ptr + sizeof(struct udp_datagram);
 }
 
@@ -52,11 +62,12 @@ void udp_send_complete(ip_addr ip, u16 src_port, u16 dst_port)
 {
     ASSERT(send_ptr);
     struct udp_datagram *dgram = send_ptr;
-    dgram->src_port = src_port;
-    dgram->dst_port = dst_port;
-    dgram->length   = send_len;
+    dgram->src_port = cpu_to_net_u16(src_port);
+    dgram->dst_port = cpu_to_net_u16(dst_port);
+    dgram->length   = cpu_to_net_u16(send_len);
     dgram->checksum = 0;
     dgram->checksum = calculate_checksum_udp(send_ptr, send_len);
     ip_send_complete(ip, IP_PROTO_UDP);
     send_ptr = NULL;
+    send_len = 0;
 }

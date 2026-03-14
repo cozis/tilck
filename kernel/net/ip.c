@@ -52,8 +52,10 @@ void ip_process_packet(void *src, size_t len)
 {
     printk("IP: Processing packet\n");
 
-    if (len < sizeof(struct ip_packet))
+    if (len < sizeof(struct ip_packet)) {
+        printk("IP: Invalid packet size (%d). Dropping it.\n", len);
         return; /* Not a valid IP packet. Drop it. */
+    }
     struct ip_packet *packet = src; /* TODO: Alignment? */
 
     int version;
@@ -68,24 +70,29 @@ void ip_process_packet(void *src, size_t len)
     }
 
     if (version != 4 || header_length < 5) {
+        printk("IP: Packet is not IPv4 or header length is less than 5. Dropping it.\n");
         return; /* Only IPv4 packets with no options are supported */
     }
 
     size_t option_count = header_length - sizeof(struct ip_packet)/4;
     if (option_count > 0) {
+        printk("IP: Packet has options. Dropping it.\n");
         // TODO: Handle IP options
         return;
     }
 
     if (is_packet_one_of_more_fragments(packet)) {
+        printk("IP: Packet is a fragment. Dropping it.\n");
         return; /* Don't support IP fragmentation */
     }
 
     if (calculate_checksum_ip((u16*) packet, 4 * header_length)) {
+        printk("IP: Packet checksum invalid. Dropping it.\n");
         return; /* Invalid checksum */
     }
 
     if (packet->dst_ip != self_ip) {
+        printk("IP: Packet not meant for us\n");
         return; /* Packet wasn't meant for us */
     }
 
@@ -94,9 +101,11 @@ void ip_process_packet(void *src, size_t len)
 
     switch (packet->protocol) {
     case IP_PROTO_ICMP:
+        printk("IP: Forwarding packet to ICMP\n");
         icmp_process_packet(payload, payload_len, packet->src_ip);
         break;
     case IP_PROTO_UDP:
+        printk("IP: Forwarding packet to UDP\n");
         udp_process_datagram(payload, payload_len, packet->src_ip);
         break;
     case IP_PROTO_TCP:
@@ -145,5 +154,8 @@ void ip_send_complete(ip_addr dst, int proto)
     packet->checksum = 0; /* Temporary value */
     packet->src_ip = self_ip;
     packet->dst_ip = dst;
+
     eth_send_complete_ip(dst, ETH_PROTO_IP);
+    send_ptr = NULL;
+    send_len = 0;
 }

@@ -55,7 +55,6 @@ static void sock_on_close(fs_handle handle)
     kcond_destroy(&s->message_available);
 
     list_remove(&s->node);
-    kfree(s); // TODO: Should vfs_free_handle be called here?
 }
 
 static void sock_close_last_handle(fs_handle handle)
@@ -405,17 +404,21 @@ int sys_sendto(int fd, const void *buf, size_t len,
 
 void dispatch_datagram(ip_addr sender_addr, struct udp_datagram *datagram)
 {
+    bool found = false;
     struct socket *s;
     list_for_each_ro(s, &all_socks, node) {
-        if (s->port == datagram->dst_port) {
+        if (s->port == net_to_cpu_u16(datagram->dst_port)) {
 
-            struct message *m = kmalloc(sizeof(struct message) + datagram->length - sizeof(datagram));
-            if (!m) return;
+            struct message *m = kmalloc(sizeof(struct message) + net_to_cpu_u16(datagram->length) - sizeof(datagram));
+            if (!m) {
+                printk("SOCKET: Couldn't allocate message buffer\n");
+                return;
+            }
 
             m->sender_addr = sender_addr;
-            m->sender_port = datagram->src_port;
-            m->size = datagram->length;
-            memcpy(m->data, datagram+1, datagram->length);
+            m->sender_port = net_to_cpu_u16(datagram->src_port);
+            m->size = net_to_cpu_u16(datagram->length);
+            memcpy(m->data, datagram+1, net_to_cpu_u16(datagram->length));
 
             printk("SOCKET: Storing datagram into socket\n");
             kmutex_lock(&s->lock);
@@ -423,7 +426,13 @@ void dispatch_datagram(ip_addr sender_addr, struct udp_datagram *datagram)
             s->num_messages++;
             kcond_signal_one(&s->message_available);
             kmutex_unlock(&s->lock);
+
+            found = true;
             break;
         }
+    }
+
+    if (!found) {
+        printk("SOCKET: No socket found for datagram\n");
     }
 }
