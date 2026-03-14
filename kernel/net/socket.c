@@ -338,7 +338,7 @@ int sys_recvfrom(int fd, void *buf, size_t len,
 
     struct sockaddr_in addr_buf;
     addr_buf.sin_family      = AF_INET;
-    addr_buf.sin_port        = m->sender_port;
+    addr_buf.sin_port        = cpu_to_net_u16(m->sender_port);
     addr_buf.sin_addr.s_addr = m->sender_addr;
     if (copy_to_user(src_addr, &addr_buf, sizeof(addr_buf)) < 0) {
         //kfree(m); TODO: uncomment

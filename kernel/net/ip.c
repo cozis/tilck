@@ -148,7 +148,7 @@ void ip_send_complete(ip_addr dst, int proto)
     }
     packet->type_of_service = 0; // TODO
     packet->total_length = cpu_to_net_u16(send_len);
-    packet->id = next_packet_id++;
+    packet->id = cpu_to_net_u16(next_packet_id++);
     packet->fragment_offset = 0; // TODO
     packet->time_to_live = 32; // TODO
     packet->protocol = proto;
@@ -156,7 +156,7 @@ void ip_send_complete(ip_addr dst, int proto)
     packet->src_ip = self_ip;
     packet->dst_ip = dst;
 
-    packet->checksum = calculate_checksum_ip(packet, sizeof(struct ip_packet));
+    packet->checksum = calculate_checksum_ip((uint16_t*) packet, 4 * header_length);
 
     eth_send_complete_ip(dst, ETH_PROTO_IP);
     send_ptr = NULL;

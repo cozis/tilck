@@ -118,7 +118,7 @@ static void send_complete(struct mac_addr dstmac, int proto,
         frame->src.data[3], frame->src.data[4], frame->src.data[5]);
     printk("  proto %x\n", net_to_cpu_u16(frame->proto));
 
-    net_driver_funcs.send_frame(send_buf, send_len);
+    net_driver_funcs.send_frame((char*) frame, frame_len);
 
     kfree(frame);
 }
@@ -128,6 +128,7 @@ void eth_send_complete(struct mac_addr dstmac, int proto)
     ASSERT(send_buf);
     send_complete(dstmac, proto, send_buf, send_len);
     send_buf = NULL;
+    send_len = 0;
 }
 
 void eth_send_complete_ip(ip_addr dstip, int proto)
@@ -139,6 +140,7 @@ void eth_send_complete_ip(ip_addr dstip, int proto)
         if (num_pending == MAX_PENDING) {
             kfree(send_buf);
             send_buf = NULL;
+            send_len = 0;
             return; // Drop
         }
         pending[num_pending++] = (struct pending_frame) {
@@ -147,6 +149,8 @@ void eth_send_complete_ip(ip_addr dstip, int proto)
             .frame = send_buf,
             .frame_len = send_len,
         };
+        send_buf = NULL;
+        send_len = 0;
     }
 }
 
