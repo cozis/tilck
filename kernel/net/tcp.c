@@ -29,12 +29,199 @@ struct tcp_segment {
 
 STATIC_ASSERT(sizeof(struct tcp_segment) == 20);
 
-static struct list tcp_socks;
+struct tcp_socket {
+    bool    is_conn;
+    bool    is_bound;
+    ip_addr bound_addr;
+    u16     bound_port;
+    struct kmutex mutex;
+};
 
-static bool is_syn(struct tcp_segment *seg)
+struct tcp_listener {
+
+    struct tcp_socket base; /* must be the first field */
+
+    struct list_node node; /* tcp_listeners list */
+
+    struct list  accept_queue;
+    struct kcond child_socket_handshake_complete;
+};
+
+/*
+ * See RFC 9293, Section 3.3.2. State Machine Overview
+ */
+enum tcp_state {
+    TCP_STATE_CLOSED = 0,   /* represents no connection state at all */
+    TCP_STATE_LISTEN,       /* represents waiting for a connection request from any remote TCP peer and port */
+    TCP_STATE_SYN_SENT,     /* represents waiting for a matching connection request after having sent a connection request. */
+    TCP_STATE_SYN_RECEIVED, /* represents waiting for a confirming connection request acknowledgment after having both received and sent a connection request */
+    TCP_STATE_ESTABLISHED,  /* represents an open connection, data received can be delivered to the user.  The normal state for the data transfer phase of the connection */
+    TCP_STATE_FIN_WAIT_1,   /* represents waiting for a connection termination request from the remote TCP peer, or an acknowledgment of the connection termination request previously sent */
+    TCP_STATE_FIN_WAIT_2,   /* represents waiting for a connection termination request from the remote TCP peer */
+    TCP_STATE_CLOSE_WAIT,   /* represents waiting for a connection termination request from the local user */
+    TCP_STATE_LAST_ACK,     /* represents waiting for an acknowledgment of the connection termination request previously sent to the remote TCP peer (this termination request sent to the remote TCP peer already included an acknowledgment of the termination request sent from the remote TCP peer) */
+    TCP_STATE_TIME_WAIT,    /* represents waiting for enough time to pass to be sure the remote TCP peer received the acknowledgment of its connection termination request and to avoid new connections being impacted by delayed segments from previous connections */
+    TCP_STATE_CLOSING,      /* represents waiting for a connection termination request acknowledgment from the remote TCP peer */
+};
+
+struct byte_queue {
+    char*  data;
+    size_t head;
+    size_t used;
+    size_t size;
+    bool   fin;
+};
+
+struct tcp_conn {
+
+    struct tcp_socket base; /* must be the first field */
+
+    struct list_node node; /* tcp_conns list */
+    struct list_node accept_queue_node; /* parent listener's accept queue */
+
+    enum tcp_state state;
+
+    ip_addr peer_addr;
+    u16     peer_port;
+
+    struct byte_queue input;
+    struct byte_queue output;
+
+    struct kcond  input_buffered;
+    struct kcond  output_flushed;
+
+    /*  See RFC 9293, Section 3.3.1 */
+    u32 snd_una; /* send unacknowledged */
+    u32 snd_nxt; /* send next */
+    u32 snd_wnd; /* send window */
+    u32 snd_up;  /* send urgent pointer */
+    u32 snd_wl1; /* segment sequence number used for last window update */
+    u32 snd_wl2; /* segment acknowledgment number used for last window update */
+    u32 iss;     /* initial send sequence number */
+    u32 rcv_nxt; /* receive next */
+    u32 rcv_wnd; /* receive window */
+    u32 rcv_up;  /* receive urgent pointer */
+    u32 irs;     /* initial receive sequence number */
+};
+
+static struct list tcp_conns;
+static struct list tcp_listeners;
+
+struct tcp_conn *tcp_conn_init(struct tcp_listener *parent,
+    ip_addr peer_addr, u16 peer_port)
 {
-    return seg->flags & TCP_FLAG_SYN;
+    struct tcp_conn *conn = kmalloc(sizeof(struct tcp_conn));
+    if (!conn)
+        return NULL;
+
+    /*
+     * Initialize the base structure and bound the newly
+     * created connection to the same address as the parent
+     * listener.
+     */
+
+    ASSERT(parent->base.is_bound);
+    conn->base.is_conn = true;
+    conn->base.is_bound = true;
+    conn->base.bound_addr = parent->base.bound_addr;
+    conn->base.bound_port = parent->base.bound_port;
+    if (kmutex_init(&conn->base.mutex) < 0) {
+        kfree(conn);
+        return NULL;
+    }
+
+    /*
+     * Add connection to the global list and the accept queue
+     */
+
+    list_insert(&tcp_conns, &conn->node);
+    list_insert(&listener->accept_queue, &conn->accept_queue_node);
+
+    /*
+     * Other stuff
+     */
+
+    if (byte_queue_init(&conn->input, xxx) < 0) {
+        kmutex_free(&conn->mutex);
+        kfree(conn);
+        return NULL;
+    }
+
+    if (byte_queue_init(&conn->output, xxx) < 0) {
+        byte_queue_free(&conn->input);
+        kmutex_free(&conn->mutex);
+        kfree(conn);
+        return NULL;
+    }
+
+    if (kcond_init(&conn->input_buffered) < 0) {
+        byte_queue_free(&conn->output);
+        byte_queue_free(&conn->input);
+        kmutex_free(&conn->mutex);
+        kfree(conn);
+        return NULL;
+    }
+
+    if (kcond_init(&conn->output_flushed) < 0) {
+        kcond_destroy(&con->input_buffered);
+        byte_queue_free(&conn->output);
+        byte_queue_free(&conn->input);
+        kmutex_free(&conn->mutex);
+        kfree(conn);
+        return NULL;
+    }
+
+    // TODO: init everything else
+
+    return 0;
 }
+
+static void init_segment(struct tcp_segment *seg,
+    ip_addr self_ip, ip_addr peer_ip, u16 src_port,
+    u16 dst_port, int flags, u32 seq, u32 ack,
+    u32 window)
+{
+    int offset = 5; // No options
+    seg->src_port = cpu_to_net_u16(src_port);
+    seg->dst_port = cpu_to_net_u16(dst_port);
+    seg->flags    = flags;
+    seg->seq_no   = cpu_to_net_u32(seq);
+    seg->ack_no   = cpu_to_net_u32(ack);
+    seg->offset1  = cpu_is_little_endian() ? 0 : offset;
+    seg->offset2  = cpu_is_little_endian() ? offset : 0;
+    seg->window   = cpu_to_net_u16(window); // Why is a 32 bit integer being backed into a 16 bit?
+    seg->checksum = 0; // Will be calculated later
+    seg->urgent_pointer = 0;
+
+    seg->checksum = calculate_checksum_l4(self_ip, peer_ip, IP_PROTO_TCP, seg, sizeof(struct tcp_segment));
+}
+
+static void send_segment(ip_addr src_addr, ip_addr dst_addr,
+                         u16 src_port, u16 dst_port, int flags,
+                         u32 seq, u32 ack)
+{
+    size_t dummy;
+    struct tcp_segment *seg = ip_send_begin(sizeof(struct tcp_segment), &dummy, true);
+    if (!seg) {
+        ASSERT(0); // TODO
+    }
+
+    init_segment(seg, src_addr, dst_addr,
+        src_port, dst_port, flags,
+        seq, ack, window);
+
+    seg->checksum = calculate_checksum_l4(src_addr, dst_addr, IP_PROTO_TCP, seg, sizeof(struct tcp_segment));
+    ip_send_complete(dst_ip, IP_PROTO_TCP);
+}
+
+static void
+send_segment_from_conn(struct tcp_conn *conn, int flags)
+{
+    send_segment(conn->base.bound_addr, conn->peer_addr,
+                 conn->base.bound_port, conn->peer_port,
+                 flags, conn->iss, conn->rcv_nxt); /* TODO: should not be conn->iss here */
+}
+
 
 static bool is_fin(struct tcp_segment *seg)
 {
@@ -59,360 +246,6 @@ static bool is_push(struct tcp_segment *seg)
 static bool is_urg(struct tcp_segment *seg)
 {
     return seg->flags & TCP_FLAG_URG;
-}
-
-static int
-tcp_byte_queue_init(struct tcp_byte_queue *queue, size_t size)
-{
-    queue->head = 0;
-    queue->used = 0;
-    queue->size = size;
-    queue->data = kmalloc(size);
-    if (!queue->data)
-        return -ENOMEM;
-    return 0;
-}
-
-static void tcp_byte_queue_free(struct tcp_byte_queue *queue)
-{
-    kfree(queue->data);
-}
-
-static void
-tcp_byte_queue_remove_head(struct tcp_byte_queue *queue, size_t num)
-{
-    ASSERT(num <= queue->used);
-    queue->head += num;
-}
-
-void init_tcp(void)
-{
-    list_init(&tcp_socks);
-}
-
-int tcp_listener_init(struct tcp_listener *listener)
-{
-    panic("TODO\n"); // TODO
-}
-
-void tcp_listener_free(struct tcp_listener *listener)
-{
-    panic("TODO\n"); // TODO
-}
-
-int tcp_listener_read_ready(struct tcp_listener *listener)
-{
-    panic("TODO"); // TODO
-}
-
-int tcp_listener_write_ready(struct tcp_listener *listener)
-{
-    panic("TODO"); // TODO
-}
-
-int tcp_conn_init(struct tcp_conn *conn, size_t input_size, size_t output_size)
-{
-    conn->input_used = 0;
-    conn->input_size = input_size;
-    conn->input_data = kmalloc(input_size);
-    if (!conn->input_data)
-        return -ENOMEM;
-
-    conn->output_used = 0;
-    conn->output_size = output_size;
-    conn->output_data = kmalloc(output_size);
-    if (!conn->output_data) {
-        kfree(conn->input_data);
-        return -ENOMEM;
-    }
-
-    return 0;
-}
-
-void tcp_conn_free(struct tcp_conn *conn)
-{
-    panic("TODO"); // TODO
-}
-
-int tcp_conn_read_out(struct tcp_conn *conn, char *dst, int cap)
-{
-    panic("TODO"); // TODO
-}
-
-int tcp_conn_write_in(struct tcp_conn *conn, char *src, int num)
-{
-    panic("TODO"); // TODO
-}
-
-int tcp_conn_read_ready(struct tcp_conn *conn)
-{
-    panic("TODO"); // TODO
-}
-
-int tcp_conn_write_ready(struct tcp_conn *conn)
-{
-    panic("TODO"); // TODO
-}
-
-void tcp_socket_init(struct tcp_socket *s)
-{
-    list_add_head(&tcp_socks, &s->node);
-    s->type = TCP_TYPE_UNCONFIGURED;
-}
-
-void tcp_socket_free(struct tcp_socket *s)
-{
-    list_remove(&s->node);
-    if (s->type == TCP_TYPE_CONNECTION)
-        tcp_conn_free(&s->conn);
-}
-
-int tcp_socket_read_ready(struct tcp_socket *s)
-{
-    if (s->type == TCP_TYPE_CONNECTION)
-        return tcp_conn_read_ready(&s->conn);
-
-    if (s->type == TCP_TYPE_LISTENER)
-        return tcp_listener_read_ready(&s->listener);
-
-    ASSERT(s->type == TCP_TYPE_UNCONFIGURED);
-    return 0;
-}
-
-int tcp_socket_write_ready(struct tcp_socket *s)
-{
-    if (s->type == TCP_TYPE_CONNECTION)
-        return tcp_conn_write_ready(&s->conn);
-
-    if (s->type == TCP_TYPE_LISTENER)
-        return tcp_listener_write_ready(&s->listener);
-
-    ASSERT(s->type == TCP_TYPE_UNCONFIGURED);
-    return 0;
-}
-
-int tcp_socket_except_ready(struct tcp_socket *s)
-{
-    return 0; /* TODO */
-}
-
-int tcp_listen(struct tcp_socket *s, int backlog)
-{
-    if (s->type != TCP_TYPE_UNCONFIGURED)
-        return -EINVAL;
-    s->type = TCP_TYPE_LISTENER;
-
-    tcp_listener_init(&s->listener);
-    return 0;
-}
-
-int tcp_accept(struct tcp_socket *s,
-    struct sockaddr *dst_addr, socklen_t *addr_len)
-{
-    if (s->type != TCP_TYPE_LISTENER)
-        return -EINVAL;
-
-    return tcp_listener_accept(&s->listener, dst_addr, addr_len);
-}
-
-static void init_segment(struct tcp_segment *seg,
-    ip_addr self_ip, ip_addr peer_ip, u16 src_port,
-    u16 dst_port, int flags, u32 seq, u32 ack,
-    u32 window)
-{
-    int offset = 5; // No options
-    seg->src_port = cpu_to_net_u16(src_port);
-    seg->dst_port = cpu_to_net_u16(dst_port);
-    seg->flags    = flags;
-    seg->seq_no   = cpu_to_net_u32(seq);
-    seg->ack_no   = cpu_to_net_u32(ack);
-    seg->offset1  = cpu_is_little_endian() ? 0 : offset;
-    seg->offset2  = cpu_is_little_endian() ? offset : 0;
-    seg->window   = cpu_to_net_u16(window); // Why is a 32 bit integer being backed into a 16 bit?
-    seg->checksum = 0; // Will be calculated later
-    seg->urgent_pointer = 0;
-
-    seg->checksum = calculate_checksum_l4(self_ip, peer_ip, IP_PROTO_TCP, seg, sizeof(struct tcp_segment));
-}
-
-int tcp_connect(struct tcp_socket *s,
-    const struct sockaddr *dst_addr, socklen_t addr_len)
-{
-    if (s->type != TCP_TYPE_UNCONFIGURED)
-        return -EINVAL;
-
-    ip_addr peer_ip;
-    u16     dst_port;
-    {
-        if (addr_len != sizeof(struct sockaddr_in))
-            return -EINVAL;
-        struct sockaddr_in *tmp = (struct sockaddr_in*) dst_addr;
-        if (tmp->sin_family != AF_INET)
-            return -EINVAL;
-        peer_ip = tmp->sin_addr.s_addr;
-        dst_port = net_to_cpu_u16(tmp->sin_port);
-    }
-
-    s->type = TCP_TYPE_CONNECTION;
-    size_t input_size = 1<<10;
-    size_t output_size = 1<<10;
-    if (tcp_conn_init(&s->conn, input_size, output_size) < 0) {
-        ASSERT(0); // TODO
-    }
-
-    size_t dummy;
-    struct tcp_segment *seg = ip_send_begin(sizeof(struct tcp_segment), &dummy, true);
-    if (!seg) {
-        ASSERT(0); // TODO
-    }
-
-    u32 iss = choose_iss();
-    u32 window = choose_window();
-
-    init_segment(seg, self_ip, peer_ip,
-        s->port, dst_port, TCP_FLAG_SYN,
-        iss, 0, window);
-
-    ip_send_complete(peer_ip, IP_PROTO_TCP);
-    return 0;
-}
-
-int tcp_recvfrom(struct tcp_socket *s, void *buf,
-    size_t len, int flags, struct sockaddr *src_addr,
-    socklen_t *addrlen)
-{
-    if (s->type != TCP_TYPE_CONNECTION)
-        return -EINVAL;
-
-    int num = -1;
-    switch (conn->state) {
-
-    case TCP_STATE_CLOSED:
-        return -EINVAL;
-
-    case TCP_STATE_LISTEN:
-        /* fallthrough */
-    case TCP_STATE_SYN_SENT:
-        /* fallthrough */
-    case TCP_STATE_SYN_RECEIVED:
-        // TODO
-        break;
-
-    case TCP_STATE_ESTABLISHED:
-        /* fallthrough */
-    case TCP_STATE_FIN_WAIT_1:
-        /* fallthrough */
-    case TCP_STATE_FIN_WAIT_2:
-        num = tcp_conn_read_out(conn, buf, len);
-        // TODO
-        break;
-
-    case TCP_STATE_CLOSE_WAIT:
-        // TODO
-        break;
-
-    case TCP_STATE_CLOSING:
-        /* fallthrough */
-    case TCP_STATE_LAST_ACK:
-        /* fallthrough */
-    case TCP_STATE_TIME_WAIT:
-        // TODO
-        break;
-
-    default:
-        ASSERT(0);
-        break;
-    }
-
-    return num;
-}
-
-int tcp_sendto(struct tcp_socket *s, const void *buf,
-    size_t len, int flags, const struct sockaddr *dest_addr,
-    socklen_t dest_len)
-{
-    if (s->type != TCP_TYPE_CONNECTION)
-        return -EINVAL;
-    struct tcp_conn *conn = &s->conn;
-
-    int num = -1;
-    switch (conn->state) {
-
-    case TCP_STATE_CLOSED:
-        return -EINVAL;
-
-    case TCP_STATE_LISTEN:
-        // TODO
-        break;
-
-    case TCP_STATE_SYN_SENT:
-        /* fallthrough */
-    case TCP_STATE_SYN_RECEIVED:
-        // TODO: queue data for transmission after entering ESTABLISHED state
-        //       if no space to queue, respond with "error: insufficient resources"
-        break;
-
-    case TCP_STATE_ESTABLISHED:
-        /* fallthrough */
-    case TCP_STATE_CLOSE_WAIT:
-        num = tcp_byte_queue_write(&conn->output, buf, len);
-        // TODO: send out
-        break;
-
-    case TCP_STATE_FIN_WAIT_1:
-        /* fallthrough */
-    case TCP_STATE_FIN_WAIT_2:
-        /* fallthrough */
-    case TCP_STATE_CLOSING:
-        /* fallthrough */
-    case TCP_STATE_LAST_ACK:
-        /* fallthrough */
-    case TCP_STATE_TIME_WAIT:
-        // TODO
-        break;
-
-    default:
-        ASSERT(0);
-        break;
-    }
-
-    return num;
-}
-
-static struct tcp_socket *find_tcp_socket_by_port(u16 port)
-{
-    struct tcp_socket *s;
-    list_for_each_ro(s, &tcp_socks, node) {
-        if (s->port == port) {
-            return s;
-        }
-    }
-    return NULL;
-}
-
-static void send_segment(ip_addr src_addr, ip_addr dst_addr,
-    u16 src_port, u16 dst_port, int flags, u32 seq, u32 ack)
-{
-    size_t dummy;
-    struct tcp_segment *seg = ip_send_begin(sizeof(struct tcp_segment), &dummy, true);
-    if (!seg) {
-        ASSERT(0); // TODO
-    }
-
-    init_segment(seg, src_addr, dst_addr,
-        src_port, dst_port, flags,
-        seq, ack, window);
-
-    seg->checksum = calculate_checksum_l4(src_addr, dst_addr, IP_PROTO_TCP, seg, sizeof(struct tcp_segment));
-    ip_send_complete(dst_ip, IP_PROTO_TCP);
-}
-
-static void
-send_segment_from_conn(struct tcp_conn *conn, int flags)
-{
-    send_segment(conn->addr, conn->peer_addr,
-                 conn->port, conn->peer_port,
-                 flags, conn->iss, conn->rcv_nxt); /* TODO: should not be conn->iss here */
 }
 
 static void state_closed(struct tcp_segment *seg)
@@ -452,12 +285,9 @@ static void state_listen(struct tcp_listener *listener, struct tcp_segment *seg)
     if (!is_syn(seg))
         return;
 
-    struct tcp_conn *conn = tcp_listener_add_conn(listener);
+    struct tcp_conn *conn = tcp_conn_init(listener, peer_addr, seg->src_port);
     if (!conn)
         return; /* Error. Drop segment. */
-
-    conn->peer_addr = peer_addr;
-    conn->peer_port = seg->src_port;
 
     /*
      * SYN segments may also hold text and other controls (like
@@ -510,6 +340,7 @@ static void state_syn_sent(struct tcp_conn *conn,
 
             if (conn->snd_una > conn->iss) {
                 conn->state = TCP_STATE_ESTABLISHED;
+                // TODO: Now that the connection is established, should we send out bytes byffered during the handshake?
                 send_segment_from_conn(conn, TCP_FLAG_ACK);
             }
 
@@ -661,6 +492,7 @@ static bool state_other_ack(struct tcp_conn *conn,
             conn->snd_wnd = seg->wnd;
             conn->snd_wl1 = seg->seq;
             conn->snd_wl2 = seg->ack;
+            // TODO: Now that the connection is established, should we send out bytes byffered during the handshake?
             /* fallthrough to the established branch */
         } else {
             send_segment_from_conn(conn, TCP_FLAG_RST);
@@ -862,18 +694,175 @@ void tcp_process_segment(struct tcp_segment *seg,
     // TODO: fix endianess
     // TODO: check checksum
 
-    struct tcp_conn *conn = find_conn(local_addr, sender_addr, seg->dst_port, seg->src_port);
+    struct tcp_conn *conn = find_tcp_conn(local_addr, sender_addr, seg->dst_port, seg->src_port);
     if (conn) {
         state_other(&s->conn, seg);
         if (conn->state == TCP_STATE_CLOSED) {
             // TODO: remove the struct
         }
     } else {
-        struct tcp_listener *listener = find_listener(local_addr, seg->dst_port);
+        struct tcp_listener *listener = find_tcp_listener(local_addr, seg->dst_port);
         if (listener) {
             state_listen(listener, seg);
         } else {
             state_closed(seg);
         }
     }
+}
+
+int tcp_accept(struct tcp_socket *s, bool block,
+    struct sockaddr *dst_addr, socklen_t *addr_len,
+    struct tcp_socket **pchild)
+{
+    if (s->is_conn)
+        return -EINVAL;
+    struct tcp_listener *l = (struct tcp_listener*) s;
+
+    mutex_lock(&l->base.mutex);
+    struct tcp_conn *child;
+    for (;;) {
+        /*
+         * Look for a connection in the accept queue that
+         * completed the handshake
+         */
+
+        list_foreach(xxx) {
+            if (child->state == TCP_STATE_ESTABLISHED ||
+                child->state == xxx)
+                break;
+        }
+
+        if (child)
+            break;
+
+        if (!block) {
+            mutex_unlock(&l->base.mutex);
+            return -EAGAIN;
+        }
+
+        kcond_wait(&l->child_socket_handshake_complete, &l->base.mutex);
+    }
+    ASSERT(child);
+    mutex_unlock(&l->base.mutex);
+
+    *pchild = (struct tcp_socket*) child;
+    return 0;
+}
+
+static int unpack_addr(struct sockaddr *sock_addr,
+    socklen_t sock_addr_len, ip_addr *addr, u16 *port)
+{
+    if (sock_addr_len != sizeof(struct sockaddr_in))
+        return -EINVAL;
+    struct sockaddr_in *tmp = (struct sockaddr_in*) sock_addr;
+
+    if (tmp->sin_family != AF_INET)
+        return -EINVAL;
+
+    *addr = tmp->sin_addr.s_addr;
+    *port = net_to_cpu_u16(tmp->sin_port);
+    return 0;
+}
+
+int tcp_connect(struct tcp_socket *s,
+    const struct sockaddr *addr, socklen_t addr_len)
+{
+    if (s->type != TCP_TYPE_UNCONFIGURED)
+        return -EINVAL;
+
+    ip_addr peer_addr;
+    u16     peer_port;
+    int rc = unpack_addr(addr, addr_len, &peer_addr, &peer_port);
+    if (rc < 0) return rc;
+
+    send_segment(self_ip, peer_ip, s->port, dst_port, TCP_FLAG_SYN, iss, 0);
+
+    // TODO: wait for completion?
+    return 0;
+}
+
+int tcp_recvfrom(struct tcp_socket *s, void *buf,
+    size_t len, int flags, struct sockaddr *src_addr,
+    socklen_t *addrlen)
+{
+    if (s->type != TCP_TYPE_CONNECTION)
+        return -EINVAL;
+
+    int num = -1;
+    switch (conn->state) {
+    case TCP_STATE_SYN_SENT:
+        /* fallthrough */
+    case TCP_STATE_SYN_RECEIVED:
+        /* Handshake incomplete */
+        // TODO: Block until complete?
+        break;
+    case TCP_STATE_ESTABLISHED:
+        /* fallthrough */
+    case TCP_STATE_FIN_WAIT_1:
+        /* fallthrough */
+    case TCP_STATE_FIN_WAIT_2:
+        num = tcp_conn_read_out(conn, buf, len);
+        // TODO: ack?
+        // TODO: block?
+        break;
+    case TCP_STATE_CLOSE_WAIT:
+        num = tcp_conn_read_out(conn, buf, len);
+        break;
+    case TCP_STATE_CLOSING:
+        /* fallthrough */
+    case TCP_STATE_LAST_ACK:
+        /* fallthrough */
+    case TCP_STATE_TIME_WAIT:
+        // TODO: return "error: connection closing"
+        break;
+    default:
+        UNREACHABLE;
+    }
+
+    return num;
+}
+
+int tcp_sendto(struct tcp_socket *s, const void *buf,
+    size_t len, int flags, const struct sockaddr *dest_addr,
+    socklen_t dest_len)
+{
+    if (s->type != TCP_TYPE_CONNECTION)
+        return -EINVAL;
+    struct tcp_conn *conn = &s->conn;
+
+    int num = -1;
+    switch (conn->state) {
+    case TCP_STATE_SYN_SENT:
+        /* fallthrough */
+    case TCP_STATE_SYN_RECEIVED:
+        // TODO: block maybe?
+        num = tcp_byte_queue_write(&conn->output, buf, len);
+        // Unlike the ESTABLISHED state, we buffer bytes
+        // but don't send them out yet.
+        break;
+    case TCP_STATE_ESTABLISHED:
+        /* fallthrough */
+    case TCP_STATE_CLOSE_WAIT:
+        num = tcp_byte_queue_write(&conn->output, buf, len);
+        if (num == 0) {
+            // TODO: block?
+        }
+        send_segment_from_conn(conn, TCP_FLAG_ACK);
+        break;
+    case TCP_STATE_FIN_WAIT_1:
+        /* fallthrough */
+    case TCP_STATE_FIN_WAIT_2:
+        /* fallthrough */
+    case TCP_STATE_CLOSING:
+        /* fallthrough */
+    case TCP_STATE_LAST_ACK:
+        /* fallthrough */
+    case TCP_STATE_TIME_WAIT:
+        num = 0;
+        break;
+    default:
+        UNREACHABLE;
+    }
+
+    return num;
 }
