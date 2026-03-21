@@ -11,11 +11,15 @@ struct tcp_segment;
 
 void init_tcp(void);
 
-void tcp_socket_init(struct tcp_socket *s);
-void tcp_socket_free(struct tcp_socket *s);
-int  tcp_socket_read_ready(struct tcp_socket *s);
-int  tcp_socket_write_ready(struct tcp_socket *s);
-int  tcp_socket_except_ready(struct tcp_socket *s);
+void tcp_process_segment(struct tcp_segment *segment,
+    size_t len, ip_addr sender_addr);
+
+int tcp_create(struct tcp_socket **s);
+
+void tcp_free(struct tcp_socket *s);
+
+int tcp_bind(struct tcp_socket *s, const struct sockaddr *addr,
+    socklen_t addrlen);
 
 int tcp_listen(struct tcp_socket *s, int backlog);
 
@@ -33,5 +37,3 @@ int tcp_sendto(struct tcp_socket *s, const void *buf,
     size_t len, int flags, const struct sockaddr *dest_addr,
     socklen_t dest_len);
 
-void tcp_process_segment(struct tcp_segment *segment,
-    size_t len, ip_addr sender_addr);

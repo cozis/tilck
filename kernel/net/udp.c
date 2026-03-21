@@ -10,6 +10,29 @@
 #include "utils.h"
 #include "endian.h"
 
+struct udp_datagram {
+    u16 src_port;
+    u16 dst_port;
+    u16 length;
+    u16 checksum;
+};
+
+struct message {
+    struct list_node node;
+    ip_addr sender_addr;
+    u16     sender_port;
+    size_t  size;
+    char    data[];
+};
+
+struct udp_socket {
+    struct list_node node;
+    struct list messages;
+    int num_messages;
+    struct kmutex lock;
+    struct kcond  message_available;
+};
+
 static void*  send_ptr; /* TODO: Race condition probably */
 static size_t send_len;
 
@@ -20,7 +43,7 @@ void init_udp(void)
     list_init(&udp_socks);
 }
 
-void udp_socket_init(struct udp_socket *s)
+void udp_create(struct udp_socket *s)
 {
     list_init(&s->messages);
     s->num_messages = 0;
@@ -29,7 +52,7 @@ void udp_socket_init(struct udp_socket *s)
     list_add_head(&udp_socks, &s->node);
 }
 
-void udp_socket_free(struct udp_socket *s)
+void udp_free(struct udp_socket *s)
 {
     kmutex_destroy(&s->lock);
     kcond_destroy(&s->message_available);
@@ -49,6 +72,12 @@ int udp_socket_write_ready(struct udp_socket *s)
 int udp_socket_except_ready(struct udp_socket *s)
 {
     return 1;
+}
+
+int udp_bind(struct udp_socket *s, const struct sockaddr *addr,
+    socklen_t addrlen)
+{
+    // TODO
 }
 
 int udp_listen(struct udp_socket *s, int backlog)
@@ -72,6 +101,10 @@ int udp_recvfrom(struct udp_socket *s, void *buf, size_t len,
     int flags, struct sockaddr *src_addr, socklen_t *addrlen)
 {
     struct message *m;
+
+    if (!s->is_bound) {
+        ASSERT(0); // TODO: Block forever
+    }
 
     printk("SOCKET: Retrieving datagram from socket\n");
     kmutex_lock(&s->lock);

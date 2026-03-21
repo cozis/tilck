@@ -23,15 +23,9 @@ struct socket {
     FS_HANDLE_BASE_FIELDS
 
     enum socktype type;
-
-    bool block;
-
-    bool is_bound;
-    u16  port; /* Host byte order */
-
     union {
-        struct udp_socket udp;
-        struct tcp_socket tcp;
+        struct udp_socket *udp;
+        struct tcp_socket *tcp;
     };
 };
 STATIC_ASSERT(sizeof(struct socket) <= MAX_FS_HANDLE_SIZE);
@@ -42,10 +36,10 @@ static void sock_on_close(fs_handle handle)
 {
     struct socket *s = handle;
     if (s->type == SOCK_UDP) {
-        udp_socket_free(&s->udp);
+        udp_free(s->udp);
     } else {
         ASSERT(s->type == SOCK_TCP);
-        tcp_socket_free(&s->tcp);
+        tcp_free(s->tcp);
     }
 }
 
@@ -169,28 +163,6 @@ static int get_free_handle_num(struct process *pi)
    return get_free_handle_num_ge(pi, 0);
 }
 
-#define EPHIMERAL_PORT_MIN 10000
-#define EPHIMERAL_PORT_MAX 60000
-
-static u16 next_ephimeral_port = EPHIMERAL_PORT_MIN;
-static u16 get_ephimeral_port(void)
-{
-    u16 port = next_ephimeral_port; /* TODO: Should ensure no conflicts can happen */
-    if (next_ephimeral_port == EPHIMERAL_PORT_MAX) {
-        next_ephimeral_port = EPHIMERAL_PORT_MIN;
-    } else {
-        next_ephimeral_port++;
-    }
-    return port;
-}
-
-static void bind_to_ephimeral_port(struct socket *s)
-{
-    ASSERT(!s->is_bound);
-    s->port = get_ephimeral_port();
-    s->is_bound = true;
-}
-
 int sys_socket(int domain, int type, int proto)
 {
     struct task *curr = get_curr_task();
@@ -226,17 +198,20 @@ int sys_socket(int domain, int type, int proto)
     retain_obj(get_fs(h));
     struct socket *s = h;
 
-    s->block = true;
-    s->is_bound = false;
-    s->port = 0;
-
+    int ret;
     if (type == SOCK_DGRAM) {
         s->type = SOCK_UDP;
-        udp_socket_init(&s->udp);
+        ret = udp_create(&s->udp);
     } else {
         ASSERT(type == SOCK_STREAM);
         s->type = SOCK_TCP;
-        tcp_socket_init(&s->tcp);
+        ret = tcp_create(&s->tcp);
+    }
+
+    if (ret < 0) {
+        release_obj(get_fs(h));
+        kmutex_unlock(&curr->pi->fslock);
+        return ret;
     }
 
     curr->pi->handles[free_fd] = (fs_handle) s;
@@ -260,34 +235,11 @@ int sys_bind(int fd, const struct sockaddr *addr,
         return -ENOTSOCK; /* TODO: Check this is the correct errno */
     struct socket *s = h;
 
-    if (s->is_bound)
-        return -EINVAL; /* Already bound */
-
-    if (addrlen != sizeof(struct sockaddr_in))
-        return -EINVAL;
-
-    struct sockaddr_in buf;
-    if (copy_from_user(&buf, addr, sizeof(buf)) < 0)
-        return -EFAULT;
-
-    if (buf.sin_family != AF_INET)
-        return -EINVAL;
-
-    if (net_to_cpu_u32(buf.sin_addr.s_addr) == INADDR_ANY) {
-        /* Do nothing */
+    if (s->type == SOCK_UDP) {
+        return udp_bind(s->udp, addr, addrlen);
     } else {
-        if (buf.sin_addr.s_addr != self_ip)
-            return -EADDRNOTAVAIL;
+        return tcp_bind(s->tcp, addr, addrlen);
     }
-
-    if (buf.sin_port == 0) {
-        s->port = get_ephimeral_port();
-    } else {
-        s->port = net_to_cpu_u16(buf.sin_port);
-    }
-
-    s->is_bound = true;
-    return 0;
 }
 
 int sys_connect(int fd, const struct sockaddr *addr,
@@ -352,12 +304,9 @@ int sys_recvfrom(int fd, void *buf, size_t len,
     struct socket *s = h;
 
     if (s->type == SOCK_UDP) {
-        if (!s->is_bound) {
-            ASSERT(0); // TODO: Block forever
-        }
-        return udp_recvfrom(&s->udp, buf, len, flags, src_addr, addrlen);
+        return udp_recvfrom(s->udp, buf, len, flags, src_addr, addrlen);
     } else {
-        return tcp_recvfrom(&s->tcp, buf, len, flags, src_addr, addrlen);
+        return tcp_recvfrom(s->tcp, buf, len, flags, src_addr, addrlen);
     }
 }
 
@@ -372,12 +321,9 @@ int sys_sendto(int fd, const void *buf, size_t len,
         return -ENOTSOCK; /* TODO: Check this is the correct errno */
     struct socket *s = h;
 
-    if (!s->is_bound)
-        bind_to_ephimeral_port(s);
-
     if (s->type == SOCK_UDP) {
-        return udp_sendto(&s->udp, buf, len, flags, dest_addr, dest_len);
+        return udp_sendto(s->udp, buf, len, flags, dest_addr, dest_len);
     } else {
-        return tcp_sendto(&s->tcp, buf, len, flags, dest_addr, dest_len);
+        return tcp_sendto(s->tcp, buf, len, flags, dest_addr, dest_len);
     }
 }

@@ -29,22 +29,11 @@ struct tcp_segment {
 
 STATIC_ASSERT(sizeof(struct tcp_segment) == 20);
 
-struct tcp_socket {
-    bool    is_conn;
-    bool    is_bound;
-    ip_addr bound_addr;
-    u16     bound_port;
-    struct kmutex mutex;
-};
-
-struct tcp_listener {
-
-    struct tcp_socket base; /* must be the first field */
-
-    struct list_node node; /* tcp_listeners list */
-
-    struct list  accept_queue;
-    struct kcond child_socket_handshake_complete;
+enum tcp_user_ret {
+    TCP_USER_RET_VOID,
+    TCP_USER_RET_CLOSE,
+    TCP_USER_RET_RESET,
+    TCP_USER_RET_REFUSED,
 };
 
 /*
@@ -72,9 +61,15 @@ struct byte_queue {
     bool   fin;
 };
 
-struct tcp_conn {
+struct tcp_listener {
 
-    struct tcp_socket base; /* must be the first field */
+    struct list_node node; /* tcp_listeners list */
+
+    struct list  accept_queue;
+    struct kcond accept_ready;
+};
+
+struct tcp_conn {
 
     struct list_node node; /* tcp_conns list */
     struct list_node accept_queue_node; /* parent listener's accept queue */
@@ -87,6 +82,7 @@ struct tcp_conn {
     struct byte_queue input;
     struct byte_queue output;
 
+    enum tcp_user_ret user_ret;
     struct kcond  input_buffered;
     struct kcond  output_flushed;
 
@@ -104,8 +100,30 @@ struct tcp_conn {
     u32 irs;     /* initial receive sequence number */
 };
 
+enum tcp_type {
+    TCP_TYPE_UNSPEC,
+    TCP_TYPE_CONN,
+    TCP_TYPE_LISTENER,
+};
+
+struct tcp_socket {
+    enum tcp_type type;
+
+    bool is_bound;
+    ip_addr bound_addr;
+    u16     bound_port;
+
+    struct kmutex mutex;
+    union {
+        struct tcp_conn conn;
+        struct tcp_listener listener;
+    };
+};
+
 static struct list tcp_conns;
 static struct list tcp_listeners;
+
+static u16 next_ephimeral_port = EPHIMERAL_PORT_MIN;
 
 struct tcp_conn *tcp_conn_init(struct tcp_listener *parent,
     ip_addr peer_addr, u16 peer_port)
@@ -251,9 +269,12 @@ static bool is_urg(struct tcp_segment *seg)
 static void state_closed(struct tcp_segment *seg)
 {
     if (!is_rst(seg)) {
-        send_segment(local_addr, sender_addr,
-                     seg->dst_port, seg->src_port,
-                     TCP_FLAG_RST, seg->ack_no,
+        send_segment(local_addr,
+                     sender_addr,
+                     seg->dst_port,
+                     seg->src_port,
+                     TCP_FLAG_RST,
+                     seg->ack_no,
                      is_ack(seg) ? seg->ack_no : 0);
     }
 }
@@ -323,7 +344,12 @@ static void state_syn_sent(struct tcp_conn *conn,
     }
 
     if (is_rst(seg)) {
-        // TODO: Signal to the user "error: connection reset"
+
+        // Signal to the user "error: connection reset"
+        conn->user_ret = TCP_USER_RET_RESET;
+        kcond_signal(&conn->input_buffered);
+        kcond_signal(&conn->output_buffered);
+
         conn->state = TCP_STATE_CLOSED;
         return; /* Drop the segment */
     }
@@ -340,7 +366,7 @@ static void state_syn_sent(struct tcp_conn *conn,
 
             if (conn->snd_una > conn->iss) {
                 conn->state = TCP_STATE_ESTABLISHED;
-                // TODO: Now that the connection is established, should we send out bytes byffered during the handshake?
+                // TODO: Now that the connection is established, should we send out bytes buffered during the handshake?
                 send_segment_from_conn(conn, TCP_FLAG_ACK);
             }
 
@@ -394,8 +420,11 @@ static bool state_other_rst(struct tcp_conn *conn,
         if (conn->passive_open) {
             conn->state = TCP_STATE_LISTEN;
         } else {
-            // TODO: signal "connection refused" to client
+            // Signal "connection refused" to client
             conn->state = TCP_STATE_CLOSED;
+            conn->user_ret = TCP_USER_RET_REFUSED;
+            kcond_signal(&conn->input_buffered);
+            kcond_signal(&conn->output_buffered);
         }
         flush_retransmission_queue();
         return false;
@@ -492,7 +521,7 @@ static bool state_other_ack(struct tcp_conn *conn,
             conn->snd_wnd = seg->wnd;
             conn->snd_wl1 = seg->seq;
             conn->snd_wl2 = seg->ack;
-            // TODO: Now that the connection is established, should we send out bytes byffered during the handshake?
+            // TODO: Now that the connection is established, should we send out bytes buffered during the handshake?
             /* fallthrough to the established branch */
         } else {
             send_segment_from_conn(conn, TCP_FLAG_RST);
@@ -610,7 +639,10 @@ static bool state_other_text(struct tcp_conn *conn,
 static bool state_other_fin(struct tcp_conn *conn,
     struct tcp_segment *seg)
 {
-    // TODO: signal to the user "connection closing"
+    // Signal to the user "connection closing"
+    conn->user_ret = TCP_USER_RET_CLOSE;
+    kcond_signal(&conn->input_buffered);
+    kcond_signal(&conn->output_buffered);
 
     conn->rcv_nxt = xxx; // Advance RCV.NXT over the FIN
     send_segment_from_conn(conn, TCP_FLAG_ACK);
@@ -710,15 +742,97 @@ void tcp_process_segment(struct tcp_segment *seg,
     }
 }
 
+int tcp_create(struct tcp_socket **p)
+{
+    struct tcp_socket *s = kmalloc(sizeof(struct tcp_socket));
+    if (!s) return -ENOMEM;
+
+    s->type = TCP_TYPE_UNSPEC;
+    s->is_bound = false;
+
+    int ret = kmutex_init(&s->mutex);
+    if (ret < 0) {
+        kfree(s);
+        return ret;
+    }
+
+    *p = s;
+    return 0;
+}
+
+void tcp_free(struct tcp_socket *s)
+{
+    if (s->type == TCP_TYPE_CONN) {
+        // TODO
+    } else if (s->type == TCP_TYPE_LISTENER) {
+        // TODO
+    }
+    kmutex_free(&s->mutex);
+    kfree(s);
+}
+
+int tcp_bind(struct tcp_socket *s,
+    const struct sockaddr *addr,
+    socklen_t addrlen)
+{
+    if (s->is_bound)
+        return -EINVAL; /* Already bound */
+
+    if (addrlen != sizeof(struct sockaddr_in))
+        return -EINVAL;
+
+    struct sockaddr_in buf;
+    if (copy_from_user(&buf, addr, sizeof(buf)) < 0)
+        return -EFAULT;
+
+    if (buf.sin_family != AF_INET)
+        return -EINVAL;
+
+    if (net_to_cpu_u32(buf.sin_addr.s_addr) == INADDR_ANY) {
+        s->bound_addr = self_ip; /* TODO: Should bind to every interface here */
+    } else {
+        if (buf.sin_addr.s_addr != self_ip)
+            return -EADDRNOTAVAIL;
+        s->bound_addr = self_ip;
+    }
+
+    if (buf.sin_port == 0) {
+        s->bound_port = get_ephimeral_port();
+    } else {
+        s->bound_port = net_to_cpu_u16(buf.sin_port);
+    }
+
+    s->is_bound = true;
+    return 0;
+}
+
+int tcp_listen(struct tcp_socket *s, int backlog)
+{
+    if (s->type != TCP_TYPE_UNSPEC)
+        return -EINVAL;
+
+    int ret = kcond_init(&s->accept_ready);
+    if (ret < 0)
+        return ret;
+
+    s->type = TCP_TYPE_LISTENER;
+    if (!s->is_bound) {
+        s->port = get_ephimeral_port(&next_ephimeral_port);
+        s->is_bound = true;
+    }
+    list_insert(&tcp_listeners, &s->listener.node);
+    list_init(&s->listener.accept_queue);
+    return 0;
+}
+
 int tcp_accept(struct tcp_socket *s, bool block,
     struct sockaddr *dst_addr, socklen_t *addr_len,
     struct tcp_socket **pchild)
 {
     if (s->is_conn)
         return -EINVAL;
-    struct tcp_listener *l = (struct tcp_listener*) s;
 
-    mutex_lock(&l->base.mutex);
+    mutex_lock(&s->mutex);
     struct tcp_conn *child;
     for (;;) {
         /*
@@ -736,14 +850,14 @@ int tcp_accept(struct tcp_socket *s, bool block,
             break;
 
         if (!block) {
-            mutex_unlock(&l->base.mutex);
+            mutex_unlock(&s->mutex);
             return -EAGAIN;
         }
 
-        kcond_wait(&l->child_socket_handshake_complete, &l->base.mutex);
+        kcond_wait(&s->listener.accept_ready, &s->mutex);
     }
     ASSERT(child);
-    mutex_unlock(&l->base.mutex);
+    mutex_unlock(&s->mutex);
 
     *pchild = (struct tcp_socket*) child;
     return 0;
@@ -774,6 +888,11 @@ int tcp_connect(struct tcp_socket *s,
     u16     peer_port;
     int rc = unpack_addr(addr, addr_len, &peer_addr, &peer_port);
     if (rc < 0) return rc;
+
+    if (!s->is_bound) {
+        s->port = get_ephimeral_port(&next_ephimeral_port);
+        s->is_bound = true;
+    }
 
     send_segment(self_ip, peer_ip, s->port, dst_port, TCP_FLAG_SYN, iss, 0);
 

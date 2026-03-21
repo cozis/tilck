@@ -5,6 +5,11 @@
 
 #include "ip.h"
 
+#define EPHIMERAL_PORT_MIN 10000
+#define EPHIMERAL_PORT_MAX 60000
+
+u16 get_ephimeral_port(u16 *next_port);
+
 struct checksum_slice {
     void  *ptr;
     size_t len;

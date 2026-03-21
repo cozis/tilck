@@ -1,6 +1,17 @@
 #include "utils.h"
 #include "endian.h"
 
+u16 get_ephimeral_port(u16 *next_port)
+{
+    u16 port = *next_port; /* TODO: Should ensure no conflicts can happen */
+    if (*next_port == EPHIMERAL_PORT_MAX) {
+        *next_port = EPHIMERAL_PORT_MIN;
+    } else {
+        (*next_port)++;
+    }
+    return port;
+}
+
 u16 calculate_checksum(struct checksum_slice *slices, int num_slices)
 {
     u32 sum = 0xffff;
